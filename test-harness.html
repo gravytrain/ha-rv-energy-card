@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RV Energy Card — Test Harness</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body { background:#14161b; padding:28px; margin:0; }
+  .stage { max-width:1120px; margin:0 auto; }
+</style>
+</head>
+<body>
+<div class="stage">
+  <rv-energy-card id="card"></rv-energy-card>
+</div>
+
+<script type="module">
+  import './dist/rv-energy-card.js';
+
+  // Mock hass — live power + rate sensors. Statistics WS returns per-site change.
+  const mkState = (state, unit) => ({ state: String(state), attributes: unit ? { unit_of_measurement: unit } : {}, last_changed:'', last_updated:'' });
+  const hass = {
+    states: {
+      'sensor.north_site_power': mkState(363, 'W'),
+      'sensor.south_site_power': mkState(2965, 'W'),
+      'sensor.em_channel_3_power': mkState(243, 'W'),
+      'sensor.total_site_power': mkState(3571, 'W'),
+      'sensor.north_site_today_energy': mkState(1.2, 'kWh'),
+      'sensor.south_site_today_energy': mkState(1.5, 'kWh'),
+      'sensor.em_channel_3_today_energy': mkState(0.5, 'kWh'),
+      'sensor.aiken_co_op_customers_out': mkState(0),
+      'input_number.base_electricity_rate': mkState(0.1447),
+      'input_number.current_pca_rate': mkState(0.0430),
+    },
+    callWS: async (msg) => {
+      // emulate recorder/statistics_during_period change rows
+      if (msg.type === 'recorder/statistics_during_period') {
+        return {
+          'sensor.refoss_smart_energy_monitor_total_energy_north_site': [{ change: 333.6 }],
+          'sensor.refoss_smart_energy_monitor_south_site_total_energy': [{ change: 474.0 }],
+          'sensor.shed_refoss_smart_energy_monitor_she_shed_total_energy': [{ change: 31500 }], // Wh
+        };
+      }
+      return {};
+    },
+    user: { name: 'Michael' },
+  };
+
+  const card = document.getElementById('card');
+  card.setConfig({ type: 'custom:rv-energy-card', billing_start_day: 12 });
+  card.hass = hass;
+
+  // Demonstrate the odometer roll: bump the period value after 1.5s by nudging live power
+  // (statistics drive the register; simulate a stats refresh with a higher number)
+  window.__roll = () => {
+    card._stats = { north: 355.0, south: 495.2, shed: 33.9 };
+    card.requestUpdate();
+  };
+</script>
+</body>
+</html>
