@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.5.1';
+const CARD_VERSION = '0.6.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -59,6 +59,8 @@ export class RvEnergyCard extends LitElement {
   @state() private _stats: Partial<Record<Site['key'], number>> = {};
   /** Live cumulative-sensor reading captured at the moment stats last loaded. */
   private _statsAnchor: Partial<Record<Site['key'], number>> = {};
+  /** Monitored total kWh for the previous billing period (all sites), from statistics. */
+  @state() private _lastPeriodMonitored?: number;
 
   private _statsTimer?: number;
   private _statsLoaded = false;
@@ -75,6 +77,13 @@ export class RvEnergyCard extends LitElement {
       base_rate_entity: 'input_number.base_electricity_rate',
       pca_rate_entity: 'input_number.current_pca_rate',
       meter_multiplier: 40,
+      show_last_period: true,
+      show_invoices: true,
+      last_bill_kwh_entity: 'input_number.last_coop_bill_kwh',
+      portal_url: 'https://billing.aikenco-op.org/onlineportal/Customer-Login',
+      bills_url: 'https://b3ck.me/drive/d/f/199RztKSB0unwLwGBCGyNOlM6yaSLEYz',
+      invoice_url_base: 'http://becknas.becknet:9000/invoices/invoice-',
+      invoice_script: 'script.generate_monthly_invoice',
       ...config,
     };
   }
@@ -149,6 +158,34 @@ export class RvEnergyCard extends LitElement {
       this._stats = {}; // fall back to live sensors
       this._statsAnchor = {};
     }
+
+    // Also load the previous period's monitored total for reconciliation.
+    if (this._config.show_last_period) {
+      try {
+        const prevEnd = start;
+        const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+        const prev = await this.hass.callWS<Record<string, StatisticRow[]>>({
+          type: 'recorder/statistics_during_period',
+          start_time: prevStart.toISOString(),
+          end_time: prevEnd.toISOString(),
+          statistic_ids: ids,
+          period: 'day',
+          types: ['change'],
+        });
+        let total = 0;
+        for (const site of SITES) {
+          const rows = prev?.[site.stat];
+          if (Array.isArray(rows) && rows.length) {
+            let sum = rows.reduce((a, r) => a + (r.change || 0), 0);
+            if (site.key === 'shed' && sum > 1000) sum = sum / 1000;
+            total += sum;
+          }
+        }
+        this._lastPeriodMonitored = total;
+      } catch {
+        this._lastPeriodMonitored = undefined;
+      }
+    }
   }
 
   /** Live cumulative total-energy reading for a site (kWh), from its stat entity. */
@@ -221,8 +258,19 @@ export class RvEnergyCard extends LitElement {
                 </div>
               </div>
             </div>
-            <div class="status ${gridOk ? '' : 'alert'}">
-              <span class="live-dot"></span>${gridOk ? 'GRID OK' : `${customersOut} OUT`}
+            <div class="head-right">
+              ${this._config.portal_url
+                ? html`<a
+                    class="portal"
+                    href="${this._config.portal_url}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >AIKEN PORTAL ↗</a
+                  >`
+                : nothing}
+              <div class="status ${gridOk ? '' : 'alert'}">
+                <span class="live-dot"></span>${gridOk ? 'GRID OK' : `${customersOut} OUT`}
+              </div>
             </div>
           </div>
 
@@ -285,9 +333,149 @@ export class RvEnergyCard extends LitElement {
               </div>
             `
           : nothing}
+
+        ${this._config.show_last_period ? this._renderLastPeriod(rate) : nothing}
+        ${this._config.show_invoices ? this._renderInvoices() : nothing}
       </div>
     `;
   }
+
+  /**
+   * Last billing period reconciliation — monitored total vs the co-op bill,
+   * with a variance readout. Confirms the gap-proof statistics stay accurate
+   * against the authoritative paper bill.
+   */
+  private _renderLastPeriod(rate: number) {
+    const { start } = this._billingWindow();
+    // previous window = [start-1 month, start)
+    const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+    const prevEnd = start;
+    const billed = this._num(this._config.last_bill_kwh_entity);
+    const monitored = this._lastPeriodMonitored ?? 0;
+    const haveData = monitored > 0 && billed > 0;
+    const varKwh = monitored - billed;
+    const varPct = billed > 0 ? (varKwh / billed) * 100 : 0;
+    const within = Math.abs(varPct) <= 2;
+    const sign = varKwh >= 0 ? '+' : '';
+
+    return html`
+      <div class="sec-head">
+        <span class="idx">§</span><h2>Last Billing Period</h2>
+        <span class="rule"></span>
+        <span class="meta">${this._fmtRange(prevStart, prevEnd)}</span>
+      </div>
+      <div class="meter">
+        ${haveData
+          ? html`
+              <div class="recon">
+                <div class="recon-col">
+                  <div class="recon-k">Monitored · actual</div>
+                  <div class="recon-v ledger">
+                    ${monitored.toFixed(1)} <small>kWh</small>
+                  </div>
+                  <div class="recon-k2">$${(monitored * rate).toFixed(2)}</div>
+                </div>
+                <div class="recon-col">
+                  <div class="recon-k">Co-op bill</div>
+                  <div class="recon-v">${billed.toFixed(1)} <small>kWh</small></div>
+                  <div class="recon-k2">$${(billed * rate).toFixed(2)}</div>
+                </div>
+                <div class="recon-col">
+                  <div class="recon-k">Variance vs bill</div>
+                  <div class="recon-v ${within ? 'ledger' : 'alert'}">
+                    ${sign}${varPct.toFixed(1)}%
+                  </div>
+                  <div class="recon-k2">${sign}${varKwh.toFixed(1)} kWh</div>
+                </div>
+              </div>
+              <div class="var-note">
+                ${within
+                  ? html`Monitored total matched the co-op bill to
+                      <b>within ${Math.abs(varPct).toFixed(1)}%</b> — gaps backfilled from
+                      device statistics.`
+                  : html`Monitored total is <b>${sign}${varPct.toFixed(1)}%</b> off the co-op
+                      bill — worth a look.`}
+              </div>
+            `
+          : html`<div class="var-note">
+              Set <code>${this._config.last_bill_kwh_entity}</code> to the co-op's billed kWh to
+              see the reconciliation.
+            </div>`}
+      </div>
+    `;
+  }
+
+  /**
+   * Invoices — generate the current invoice, and link out to stored invoice
+   * PDFs (per-month deep link) and the co-op bill folder.
+   */
+  private _renderInvoices() {
+    const base = this._config.invoice_url_base;
+    const now = new Date();
+    // current + previous three months (YYYY-MM)
+    const months: { label: string; ym: string }[] = [];
+    for (let i = 0; i < 4; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push({
+        label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+        ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      });
+    }
+
+    return html`
+      <div class="sec-head">
+        <span class="idx">§</span><h2>Invoices</h2>
+        <span class="rule"></span>
+        <span class="meta">IN-LAWS · NORTH + SHE-SHED</span>
+      </div>
+      <div class="meter">
+        <div class="actions">
+          ${this._config.invoice_script
+            ? html`<button class="btn primary" @click=${this._generateInvoice}>
+                ⎙ Generate invoice
+              </button>`
+            : nothing}
+          ${this._config.bills_url
+            ? html`<a
+                class="btn"
+                href="${this._config.bills_url}"
+                target="_blank"
+                rel="noopener noreferrer"
+                >↗ View co-op bills</a
+              >`
+            : nothing}
+        </div>
+        <div class="invoice-list">
+          ${months.map(
+            (m) => html`
+              <div class="invoice-row">
+                <span class="p">${m.label}</span>
+                <span class="s">
+                  ${base
+                    ? html`<a href="${base}${m.ym}.pdf" target="_blank" rel="noopener noreferrer"
+                        >invoice ↗</a
+                      >`
+                    : nothing}
+                </span>
+              </div>
+            `
+          )}
+        </div>
+      </div>
+    `;
+  }
+
+  private _generateInvoice = () => {
+    const script = this._config.invoice_script;
+    if (!this.hass || !script) return;
+    const [domain, service] = script.split('.');
+    this.hass.callWS({
+      type: 'call_service',
+      domain,
+      service,
+      service_data: {},
+    });
+  };
 
   /**
    * Integrated live-flow diagram: a Grid source node feeds the three site
@@ -367,10 +555,22 @@ export class RvEnergyCard extends LitElement {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
         padding-bottom: 16px;
         margin-bottom: 20px;
         border-bottom: 1px solid var(--hairline);
       }
+      .brand { min-width: 0; }
+      .acct { overflow: hidden; text-overflow: ellipsis; }
+      .head-right { display: flex; align-items: center; gap: 10px; }
+      .portal {
+        display: inline-flex; align-items: center; gap: 6px;
+        font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+        letter-spacing: 0.06em; color: var(--brass); border: 1px solid var(--brass-dim);
+        border-radius: 5px; padding: 6px 10px; text-decoration: none; white-space: nowrap;
+      }
+      .portal:hover { background: rgba(217, 164, 65, 0.1); }
       .brand { display: flex; align-items: center; gap: 14px; }
       .glyph {
         width: 40px; height: 40px; border-radius: 7px;
@@ -442,10 +642,10 @@ export class RvEnergyCard extends LitElement {
       }
       @keyframes fl-move { to { stroke-dashoffset: -38; } }
       @media (prefers-reduced-motion: reduce) { .fl-flow { animation: none; } }
-      .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
-      .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
-      .fl-name { font-family: var(--font-display); font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; }
-      .fl-kwh { fill: var(--ink-faint); font-family: var(--font-mono); font-size: 9px; }
+      .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
+      .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 9px; }
+      .fl-name { font-family: var(--font-display); font-size: 13px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+      .fl-kwh { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 10px; }
       .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 26px 2px 12px; }
       .sec-head .idx { font-family: var(--font-mono); font-size: 11px; color: var(--brass); font-weight: 700; }
       .sec-head h2 {
@@ -473,8 +673,48 @@ export class RvEnergyCard extends LitElement {
       .tbl tr:last-child td { border-bottom: none; }
       .tbl .muted { color: var(--ink-dim); }
       .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
-      @media (max-width: 820px) {
-        .register-row { flex-direction: column; align-items: flex-start; }
+
+      /* Last-period reconciliation */
+      .recon { display: flex; gap: 16px; flex-wrap: wrap; }
+      .recon-col { flex: 1; min-width: 140px; }
+      .recon-k {
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.14em;
+        text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px;
+      }
+      .recon-v { font-family: var(--font-display); font-size: 26px; font-weight: 600; color: var(--ink); }
+      .recon-v small { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); font-weight: 400; }
+      .recon-v.ledger { color: var(--ledger); }
+      .recon-v.alert { color: var(--needle); }
+      .recon-k2 { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 4px; }
+      .var-note { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); margin-top: 16px; line-height: 1.6; }
+      .var-note b { color: var(--ledger); font-weight: 700; }
+      .var-note code { color: var(--brass); font-size: 11px; }
+
+      /* Invoice actions + list */
+      .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+      .btn {
+        display: inline-flex; align-items: center; gap: 8px;
+        font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+        padding: 10px 14px; border-radius: 6px; cursor: pointer; text-decoration: none;
+        border: 1px solid var(--hairline); color: var(--ink); background: rgba(255, 255, 255, 0.02);
+      }
+      .btn:hover { border-color: var(--brass-dim); }
+      .btn.primary {
+        color: #241c08; background: linear-gradient(180deg, var(--brass), var(--brass-dim));
+        border-color: var(--brass-dim);
+      }
+      .invoice-list { margin-top: 14px; font-family: var(--font-mono); font-size: 12px; }
+      .invoice-row {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 9px 4px; border-bottom: 1px solid rgba(49, 56, 66, 0.5);
+      }
+      .invoice-row:last-child { border-bottom: none; }
+      .invoice-row .p { color: var(--ink); }
+      .invoice-row a { color: var(--brass); text-decoration: none; font-weight: 700; }
+
+      @media (max-width: 760px) {
+        .hero { flex-direction: column; align-items: stretch; }
+        .head-right { width: 100%; justify-content: space-between; }
       }
     `,
   ];

@@ -29,6 +29,14 @@ export interface RvEnergyCardConfig {
   base_rate_entity?: string;
   pca_rate_entity?: string;
   meter_multiplier?: number;
+  // billing reconciliation + invoices
+  show_last_period?: boolean;
+  show_invoices?: boolean;
+  last_bill_kwh_entity?: string; // co-op billed kWh for the previous period
+  portal_url?: string; // Aiken co-op login portal
+  bills_url?: string; // folder link to stored co-op bill PDFs
+  invoice_url_base?: string; // e.g. http://becknas.becknet:9000/invoices/invoice- (YYYY-MM.pdf appended)
+  invoice_script?: string; // script to (re)generate the current invoice
   [key: string]: unknown;
 }
 

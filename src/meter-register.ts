@@ -50,14 +50,16 @@ export class MeterRegister extends LitElement {
         display: inline-block;
       }
       .odometer {
-        display: inline-flex;
+        display: flex;
+        flex-wrap: wrap;
         align-items: stretch;
         gap: 3px;
       }
       .digit {
         position: relative;
-        width: 40px;
-        height: 62px;
+        /* responsive: shrinks on narrow screens so all digits + unit + mult fit */
+        width: clamp(28px, 8.5vw, 40px);
+        height: clamp(44px, 13vw, 62px);
         overflow: hidden;
         border: 1px solid #000;
         border-radius: 4px;
@@ -93,12 +95,12 @@ export class MeterRegister extends LitElement {
         will-change: transform;
       }
       .cell {
-        height: 62px;
+        height: clamp(44px, 13vw, 62px);
         display: grid;
         place-items: center;
         font-family: var(--font-mono);
         font-weight: 800;
-        font-size: 40px;
+        font-size: clamp(27px, 8vw, 40px);
         line-height: 1;
         color: var(--ink);
         text-shadow: 0 1px 1px #000;
@@ -145,7 +147,7 @@ export class MeterRegister extends LitElement {
           const isDec = i >= decStart;
           return html`
             <div class="digit ${isDec ? 'dec' : ''}">
-              <div class="strip" style="transform: translateY(${-d * 62}px)">
+              <div class="strip" style="transform: translateY(-${d * 10}%)">
                 ${[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(
                   (n) => html`<div class="cell">${n}</div>`
                 )}

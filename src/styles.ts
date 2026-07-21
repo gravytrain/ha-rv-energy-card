@@ -18,8 +18,8 @@ export const tokens = css`
     --needle: #c8483a;
     --ledger: #9fbf8f;
     --ink: #e7e3d8;
-    --ink-dim: #8a8f99;
-    --ink-faint: #5a616c;
+    --ink-dim: #9aa0ab;
+    --ink-faint: #6b7280;
     --north: #5b9bd5;
     --south: #6bbf7b;
     --shed: #a681c4;
