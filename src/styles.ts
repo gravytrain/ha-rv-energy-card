@@ -10,6 +10,7 @@ export const tokens = css`
     --housing: #14161b;
     --panel: #1c2027;
     --panel-2: #23282f;
+    --well: #171a20;
     --bezel: #2c323b;
     --hairline: #333a44;
     --brass: #d9a441;

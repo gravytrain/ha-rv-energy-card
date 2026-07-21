@@ -1,4 +1,4 @@
-import { LitElement, html, css, PropertyValues, nothing } from 'lit';
+import { LitElement, html, svg, css, PropertyValues, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { tokens } from './styles.js';
 import './meter-register.js';
@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.4.0';
+const CARD_VERSION = '0.5.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -226,7 +226,7 @@ export class RvEnergyCard extends LitElement {
             </div>
           </div>
 
-          <div class="register-row">
+          <div class="hero">
             <div class="register-block">
               <div class="register-label">Cumulative — this billing period</div>
               <meter-register
@@ -243,9 +243,7 @@ export class RvEnergyCard extends LitElement {
               </div>
             </div>
 
-            <div class="dials">
-              ${SITES.map((s) => this._renderDial(s))}
-            </div>
+            ${this._renderFlow(totalPower)}
           </div>
         </div>
 
@@ -291,26 +289,59 @@ export class RvEnergyCard extends LitElement {
     `;
   }
 
-  private _renderDial(site: Site) {
-    const power = this._num(site.power);
-    const max = (this._config[`${site.key}_max_power`] as number) || 5000;
-    const pct = Math.min(100, Math.max(0, (power / max) * 100));
-    const circ = 2 * Math.PI * 32;
-    const offset = circ - (pct / 100) * circ;
+  /**
+   * Integrated live-flow diagram: a Grid source node feeds the three site
+   * nodes. Each connecting line animates with dashes whose speed is
+   * proportional to that site's current draw (faster = more power); a
+   * zero-draw site shows a dimmed, static line. The site nodes double as the
+   * per-site readout (live W + period kWh) — replacing the old separate dials
+   * so no data point is duplicated.
+   */
+  private _renderFlow(totalPower: number) {
+    // Y positions for the three site nodes (top / mid / bottom) in a 190-tall viewBox.
+    const rows = [40, 95, 150];
+    const maxExpected = (this._config.max_expected_power as number) || 5000;
+
+    const line = (site: Site, y: number) => {
+      const power = this._num(site.power);
+      // dash animation duration: map power → 1.0s (high) .. 5s (low); static if ~0.
+      const frac = Math.min(1, Math.max(0, power / maxExpected));
+      const dur = power < 2 ? 0 : (5 - frac * 4).toFixed(2);
+      const d = `M78 95 C170 95, 200 ${y}, 300 ${y}`;
+      return html`
+        <path class="fl-base" d="${d}" stroke="${site.color}" />
+        ${dur === 0
+          ? nothing
+          : html`<path class="fl-flow" d="${d}" stroke="${site.color}"
+              style="animation-duration:${dur}s" />`}
+      `;
+    };
+
+    const node = (site: Site, y: number) => {
+      const power = this._num(site.power);
+      const kwh = this._periodKwh(site);
+      return svg`
+        <circle cx="330" cy="${y}" r="24" fill="none" stroke="${site.color}" stroke-width="2.5" />
+        <text x="330" y="${y - 2}" text-anchor="middle" class="fl-w">${Math.round(power)}</text>
+        <text x="330" y="${y + 9}" text-anchor="middle" class="fl-u">W</text>
+        <text x="366" y="${y - 3}" class="fl-name" fill="${site.color}">${site.name.toUpperCase()}</text>
+        <text x="366" y="${y + 9}" class="fl-kwh">${kwh.toFixed(0)} kWh period</text>
+      `;
+    };
+
     return html`
-      <div class="dial">
-        <svg width="78" height="78" viewBox="0 0 78 78">
-          <circle cx="39" cy="39" r="32" fill="none" stroke="#2a2f37" stroke-width="6" />
-          <circle
-            cx="39" cy="39" r="32" fill="none" stroke="${site.color}" stroke-width="6"
-            stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${offset}"
-            transform="rotate(-90 39 39)"
-          />
-          <text x="39" y="37" text-anchor="middle" class="dial-w">${Math.round(power)}</text>
-          <text x="39" y="50" text-anchor="middle" class="dial-u">W</text>
+      <div class="flow-well">
+        <div class="flow-cap">LIVE FLOW · <span>GRID → SITES</span></div>
+        <svg class="flow" viewBox="0 0 470 190" preserveAspectRatio="xMidYMid meet">
+          ${SITES.map((s, i) => line(s, rows[i]))}
+          <circle cx="52" cy="95" r="26" fill="none" stroke="var(--brass-dim)" stroke-width="2.5" />
+          <text x="52" y="92" text-anchor="middle" class="fl-w" style="fill:var(--brass)">
+            ${(totalPower / 1000).toFixed(2)}
+          </text>
+          <text x="52" y="104" text-anchor="middle" class="fl-u">kW</text>
+          <text x="52" y="140" text-anchor="middle" class="fl-name" style="fill:var(--ink-dim)">GRID</text>
+          ${SITES.map((s, i) => node(s, rows[i]))}
         </svg>
-        <div class="dial-name" style="color:${site.color}">${site.name}</div>
-        <div class="dial-val">${this._periodKwh(site).toFixed(1)} kWh</div>
       </div>
     `;
   }
@@ -372,10 +403,12 @@ export class RvEnergyCard extends LitElement {
         100% { box-shadow: 0 0 0 0 rgba(159, 191, 143, 0); }
       }
       @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
-      .register-row {
-        display: flex; gap: 26px; align-items: center; flex-wrap: wrap;
+      .hero {
+        display: flex; gap: 20px; align-items: stretch; flex-wrap: wrap;
       }
-      .register-block { flex: 1; min-width: 320px; }
+      .register-block {
+        flex: 1; min-width: 330px; display: flex; flex-direction: column; justify-content: center;
+      }
       .register-label {
         font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.22em;
         text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px;
@@ -384,15 +417,32 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 12px;
       }
       .register-sub b { color: var(--ledger); font-weight: 700; }
-      .dials { display: flex; gap: 18px; }
-      .dial { text-align: center; }
-      .dial-w { fill: var(--ink); font-family: var(--font-mono); font-size: 14px; font-weight: 700; }
-      .dial-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
-      .dial-name {
-        font-family: var(--font-display); font-size: 13px; letter-spacing: 0.06em;
-        margin-top: 4px; text-transform: uppercase;
+
+      /* integrated live-flow well */
+      .flow-well {
+        flex: 1.1; min-width: 360px; position: relative;
+        background: var(--well, #171a20); border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.35) inset, 0 0 0 1px #000 inset;
+        padding: 16px 18px;
       }
-      .dial-val { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
+      .flow-cap {
+        position: absolute; top: 12px; left: 16px;
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.2em;
+        text-transform: uppercase; color: var(--ink-faint);
+      }
+      .flow-cap span { color: var(--ledger); }
+      svg.flow { width: 100%; height: 190px; display: block; margin-top: 8px; }
+      .fl-base { fill: none; stroke-width: 2.5; stroke-linecap: round; opacity: 0.22; }
+      .fl-flow {
+        fill: none; stroke-width: 2.5; stroke-linecap: round;
+        stroke-dasharray: 2 10; animation: fl-move 1s linear infinite;
+      }
+      @keyframes fl-move { to { stroke-dashoffset: -24; } }
+      @media (prefers-reduced-motion: reduce) { .fl-flow { animation: none; } }
+      .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+      .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
+      .fl-name { font-family: var(--font-display); font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase; }
+      .fl-kwh { fill: var(--ink-faint); font-family: var(--font-mono); font-size: 9px; }
       .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 26px 2px 12px; }
       .sec-head .idx { font-family: var(--font-mono); font-size: 11px; color: var(--brass); font-weight: 700; }
       .sec-head h2 {
