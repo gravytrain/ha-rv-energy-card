@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.5.0';
+const CARD_VERSION = '0.5.1';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -307,12 +307,14 @@ export class RvEnergyCard extends LitElement {
       // dash animation duration: map power → 1.0s (high) .. 5s (low); static if ~0.
       const frac = Math.min(1, Math.max(0, power / maxExpected));
       const dur = power < 2 ? 0 : (5 - frac * 4).toFixed(2);
-      const d = `M78 95 C170 95, 200 ${y}, 300 ${y}`;
-      return html`
+      // from the Grid node's right edge (x≈80) to each site node's left edge (x≈304)
+      const d = `M80 95 C180 95, 210 ${y}, 304 ${y}`;
+      // NOTE: must use the svg`` tag so <path> lands in the SVG namespace and renders.
+      return svg`
         <path class="fl-base" d="${d}" stroke="${site.color}" />
         ${dur === 0
           ? nothing
-          : html`<path class="fl-flow" d="${d}" stroke="${site.color}"
+          : svg`<path class="fl-flow" d="${d}" stroke="${site.color}"
               style="animation-duration:${dur}s" />`}
       `;
     };
@@ -432,12 +434,13 @@ export class RvEnergyCard extends LitElement {
       }
       .flow-cap span { color: var(--ledger); }
       svg.flow { width: 100%; height: 190px; display: block; margin-top: 8px; }
-      .fl-base { fill: none; stroke-width: 2.5; stroke-linecap: round; opacity: 0.22; }
+      .fl-base { fill: none; stroke-width: 3; stroke-linecap: round; opacity: 0.28; }
       .fl-flow {
-        fill: none; stroke-width: 2.5; stroke-linecap: round;
-        stroke-dasharray: 2 10; animation: fl-move 1s linear infinite;
+        fill: none; stroke-width: 3.5; stroke-linecap: round;
+        stroke-dasharray: 7 12; animation: fl-move 1s linear infinite;
+        filter: drop-shadow(0 0 3px currentColor);
       }
-      @keyframes fl-move { to { stroke-dashoffset: -24; } }
+      @keyframes fl-move { to { stroke-dashoffset: -38; } }
       @media (prefers-reduced-motion: reduce) { .fl-flow { animation: none; } }
       .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
       .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
