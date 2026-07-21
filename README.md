@@ -1,7 +1,23 @@
 # RV Energy Card
 
-A dark-themed energy dashboard card for Home Assistant, covering the RV sites
-(North, South, She-Shed). Matches the Double E Reserve / Home Overview design system.
+A **Meter Register** energy dashboard card for Home Assistant, covering the RV
+sites (North, South, She-Shed). The design is grounded in the physical kWh meter
+and the Aiken Electric Co-op paper bill — graphite housing, brass dial, red
+needle, pale ledger-green readout — with an odometer-style rolling kWh register
+as its signature element.
+
+Built with **Lit** and bundled with **esbuild** (like native/community cards),
+so DOM updates are granular and the register can animate its roll.
+
+## Development
+
+```bash
+npm install
+npm run build     # bundles src/ + Lit → dist/rv-energy-card.js (committed; HACS serves it)
+npm run watch     # rebuild on change
+```
+
+Source lives in `src/` (TypeScript). Do not edit `dist/` by hand.
 
 **Billing and period numbers are pulled from Home Assistant long-term statistics**
 (device-sourced, gap-proof) rather than the lossy live utility-meter sensors — so
