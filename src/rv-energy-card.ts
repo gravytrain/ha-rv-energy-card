@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.6.1';
+const CARD_VERSION = '0.6.2';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -80,10 +80,13 @@ export class RvEnergyCard extends LitElement {
       show_last_period: true,
       show_invoices: true,
       last_bill_kwh_entity: 'input_number.last_coop_bill_kwh',
+      last_bill_energy_entity: 'input_number.last_coop_bill_energy_charge',
+      last_bill_local_tax_entity: 'input_number.last_coop_bill_local_tax',
+      last_bill_sc_tax_entity: 'input_number.last_coop_bill_sc_tax',
       portal_url: 'https://billing.aikenco-op.org/onlineportal/Customer-Login',
       bills_url: 'https://b3ck.me/drive/d/f/199RztKSB0unwLwGBCGyNOlM6yaSLEYz',
       invoice_url_base: 'http://becknas.becknet:9000/invoices/invoice-',
-      invoice_script: 'rest_command.generate_invoice',
+      invoice_script: 'script.generate_monthly_invoice',
       ...config,
     };
   }
@@ -345,12 +348,17 @@ export class RvEnergyCard extends LitElement {
    * with a variance readout. Confirms the gap-proof statistics stay accurate
    * against the authoritative paper bill.
    */
-  private _renderLastPeriod(rate: number) {
+  private _renderLastPeriod(_rate: number) {
     const { start } = this._billingWindow();
     // previous window = [start-1 month, start)
     const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
     const prevEnd = start;
     const billed = this._num(this._config.last_bill_kwh_entity);
+    // Real dollar amounts entered from the paper bill (energy + both taxes).
+    const billEnergy = this._num(this._config.last_bill_energy_entity);
+    const billLocal = this._num(this._config.last_bill_local_tax_entity);
+    const billSc = this._num(this._config.last_bill_sc_tax_entity);
+    const billTotal = billEnergy + billLocal + billSc;
     const monitored = this._lastPeriodMonitored ?? 0;
     const haveData = monitored > 0 && billed > 0;
     const varKwh = monitored - billed;
@@ -373,12 +381,14 @@ export class RvEnergyCard extends LitElement {
                   <div class="recon-v ledger">
                     ${monitored.toFixed(1)} <small>kWh</small>
                   </div>
-                  <div class="recon-k2">$${(monitored * rate).toFixed(2)}</div>
+                  <div class="recon-k2">device statistics</div>
                 </div>
                 <div class="recon-col">
                   <div class="recon-k">Co-op bill</div>
                   <div class="recon-v">${billed.toFixed(1)} <small>kWh</small></div>
-                  <div class="recon-k2">$${(billed * rate).toFixed(2)}</div>
+                  <div class="recon-k2">
+                    ${billTotal > 0 ? html`$${billTotal.toFixed(2)}` : nothing}
+                  </div>
                   <div class="recon-edit">
                     <input
                       type="number"
@@ -423,14 +433,21 @@ export class RvEnergyCard extends LitElement {
    */
   private _renderInvoices() {
     const base = this._config.invoice_url_base;
-    const now = new Date();
-    // current + previous three months (YYYY-MM)
+    // Invoices exist only for COMPLETED billing periods. The current window's
+    // start is the in-progress (unbilled) period, so completed periods begin at
+    // start−1 month, start−2, etc. The invoice file is keyed by each period's
+    // START month (matching the script's `calc_period_start[:7]`), so the label
+    // and the deep-link YYYY-MM must both use the period-start month.
+    const { start } = this._billingWindow();
+    const startDay = this._config.billing_start_day ?? 12;
     const months: { label: string; ym: string }[] = [];
-    for (let i = 0; i < 4; i++) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    for (let i = 1; i <= 4; i++) {
+      const periodStart = new Date(start.getFullYear(), start.getMonth() - i, startDay);
+      const periodEnd = new Date(start.getFullYear(), start.getMonth() - i + 1, startDay);
+      const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
       months.push({
-        label: d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
-        ym: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+        label: `${fmt(periodStart)} – ${fmt(periodEnd)}`,
+        ym: `${periodStart.getFullYear()}-${String(periodStart.getMonth() + 1).padStart(2, '0')}`,
       });
     }
 
