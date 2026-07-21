@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.6.0';
+const CARD_VERSION = '0.6.1';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -83,7 +83,7 @@ export class RvEnergyCard extends LitElement {
       portal_url: 'https://billing.aikenco-op.org/onlineportal/Customer-Login',
       bills_url: 'https://b3ck.me/drive/d/f/199RztKSB0unwLwGBCGyNOlM6yaSLEYz',
       invoice_url_base: 'http://becknas.becknet:9000/invoices/invoice-',
-      invoice_script: 'script.generate_monthly_invoice',
+      invoice_script: 'rest_command.generate_invoice',
       ...config,
     };
   }
@@ -379,6 +379,18 @@ export class RvEnergyCard extends LitElement {
                   <div class="recon-k">Co-op bill</div>
                   <div class="recon-v">${billed.toFixed(1)} <small>kWh</small></div>
                   <div class="recon-k2">$${(billed * rate).toFixed(2)}</div>
+                  <div class="recon-edit">
+                    <input
+                      type="number"
+                      class="bill-input"
+                      .value=${billed.toString()}
+                      @change=${this._updateBilledKwh}
+                      min="0"
+                      step="0.1"
+                      placeholder="Bill kWh"
+                    />
+                    <span class="edit-hint">edit to update</span>
+                  </div>
                 </div>
                 <div class="recon-col">
                   <div class="recon-k">Variance vs bill</div>
@@ -477,6 +489,20 @@ export class RvEnergyCard extends LitElement {
     });
   };
 
+  private _updateBilledKwh = (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const value = parseFloat(input.value);
+    if (!this.hass || isNaN(value) || value < 0) return;
+    const entity = this._config.last_bill_kwh_entity;
+    if (!entity) return;
+    this.hass.callWS({
+      type: 'call_service',
+      domain: 'input_number',
+      service: 'set_value',
+      service_data: { entity_id: entity, value },
+    });
+  };
+
   /**
    * Integrated live-flow diagram: a Grid source node feeds the three site
    * nodes. Each connecting line animates with dashes whose speed is
@@ -484,54 +510,97 @@ export class RvEnergyCard extends LitElement {
    * zero-draw site shows a dimmed, static line. The site nodes double as the
    * per-site readout (live W + period kWh) — replacing the old separate dials
    * so no data point is duplicated.
+   *
+   * Renders both horizontal (wide screens) and vertical (mobile) variants;
+   * CSS controls which is visible.
    */
   private _renderFlow(totalPower: number) {
-    // Y positions for the three site nodes (top / mid / bottom) in a 190-tall viewBox.
-    const rows = [40, 95, 150];
     const maxExpected = (this._config.max_expected_power as number) || 5000;
 
-    const line = (site: Site, y: number) => {
-      const power = this._num(site.power);
-      // dash animation duration: map power → 1.0s (high) .. 5s (low); static if ~0.
-      const frac = Math.min(1, Math.max(0, power / maxExpected));
-      const dur = power < 2 ? 0 : (5 - frac * 4).toFixed(2);
-      // from the Grid node's right edge (x≈80) to each site node's left edge (x≈304)
-      const d = `M80 95 C180 95, 210 ${y}, 304 ${y}`;
-      // NOTE: must use the svg`` tag so <path> lands in the SVG namespace and renders.
+    // Horizontal: Grid (left) → 3 sites (right, stacked vertically at y=40/95/150)
+    const horizontal = () => {
+      const rows = [40, 95, 150];
+      const line = (site: Site, y: number) => {
+        const power = this._num(site.power);
+        const frac = Math.min(1, Math.max(0, power / maxExpected));
+        const dur = power < 2 ? 0 : (5 - frac * 4).toFixed(2);
+        const d = `M80 95 C180 95, 210 ${y}, 304 ${y}`;
+        return svg`
+          <path class="fl-base" d="${d}" stroke="${site.color}" />
+          ${dur === 0 ? nothing : svg`<path class="fl-flow" d="${d}" stroke="${site.color}" style="animation-duration:${dur}s" />`}
+        `;
+      };
+      const node = (site: Site, y: number) => {
+        const power = this._num(site.power);
+        const kwh = this._periodKwh(site);
+        return svg`
+          <circle cx="330" cy="${y}" r="24" fill="none" stroke="${site.color}" stroke-width="2.5" />
+          <text x="330" y="${y - 2}" text-anchor="middle" class="fl-w">${Math.round(power)}</text>
+          <text x="330" y="${y + 9}" text-anchor="middle" class="fl-u">W</text>
+          <text x="366" y="${y - 3}" class="fl-name" fill="${site.color}">${site.name.toUpperCase()}</text>
+          <text x="366" y="${y + 9}" class="fl-kwh">${kwh.toFixed(0)} kWh period</text>
+        `;
+      };
       return svg`
-        <path class="fl-base" d="${d}" stroke="${site.color}" />
-        ${dur === 0
-          ? nothing
-          : svg`<path class="fl-flow" d="${d}" stroke="${site.color}"
-              style="animation-duration:${dur}s" />`}
+        <svg class="flow flow-h" viewBox="0 0 470 190" preserveAspectRatio="xMidYMid meet">
+          ${SITES.map((s, i) => line(s, rows[i]))}
+          <circle cx="52" cy="95" r="26" fill="none" stroke="var(--brass-dim)" stroke-width="2.5" />
+          <text x="52" y="92" text-anchor="middle" class="fl-w" style="fill:var(--brass)">${(totalPower / 1000).toFixed(2)}</text>
+          <text x="52" y="104" text-anchor="middle" class="fl-u">kW</text>
+          <text x="52" y="140" text-anchor="middle" class="fl-name" style="fill:var(--ink-dim)">GRID</text>
+          ${SITES.map((s, i) => node(s, rows[i]))}
+        </svg>
       `;
     };
 
-    const node = (site: Site, y: number) => {
-      const power = this._num(site.power);
-      const kwh = this._periodKwh(site);
+    // Vertical: Grid (top) → vertical trunk → 3 sites on same horizontal line
+    const vertical = () => {
+      const gridX = 95, gridY = 35; // Grid node at top
+      const siteY = 150; // All sites on same horizontal line
+      const siteXs = [30, 95, 160]; // North left, South center, Shed right
+      const trunkY = 100; // where vertical trunk meets horizontal splits
+
+      const line = (site: Site, x: number) => {
+        const power = this._num(site.power);
+        const frac = Math.min(1, Math.max(0, power / maxExpected));
+        const dur = power < 2 ? 0 : (5 - frac * 4).toFixed(2);
+        // Vertical trunk from Grid, then curve horizontally to each site
+        const d = `M${gridX} ${gridY + 28} L${gridX} ${trunkY} C${gridX} ${trunkY + 20}, ${x} ${siteY - 40}, ${x} ${siteY - 28}`;
+        return svg`
+          <path class="fl-base" d="${d}" stroke="${site.color}" />
+          ${dur === 0 ? nothing : svg`<path class="fl-flow" d="${d}" stroke="${site.color}" style="animation-duration:${dur}s" />`}
+        `;
+      };
+
+      const node = (site: Site, x: number) => {
+        const power = this._num(site.power);
+        const kwh = this._periodKwh(site);
+        return svg`
+          <circle cx="${x}" cy="${siteY}" r="22" fill="none" stroke="${site.color}" stroke-width="2.5" />
+          <text x="${x}" y="${siteY - 2}" text-anchor="middle" class="fl-w">${Math.round(power)}</text>
+          <text x="${x}" y="${siteY + 9}" text-anchor="middle" class="fl-u">W</text>
+          <text x="${x}" y="${siteY + 36}" text-anchor="middle" class="fl-name" fill="${site.color}">${site.name.toUpperCase()}</text>
+          <text x="${x}" y="${siteY + 48}" text-anchor="middle" class="fl-kwh">${kwh.toFixed(0)} kWh</text>
+        `;
+      };
+
       return svg`
-        <circle cx="330" cy="${y}" r="24" fill="none" stroke="${site.color}" stroke-width="2.5" />
-        <text x="330" y="${y - 2}" text-anchor="middle" class="fl-w">${Math.round(power)}</text>
-        <text x="330" y="${y + 9}" text-anchor="middle" class="fl-u">W</text>
-        <text x="366" y="${y - 3}" class="fl-name" fill="${site.color}">${site.name.toUpperCase()}</text>
-        <text x="366" y="${y + 9}" class="fl-kwh">${kwh.toFixed(0)} kWh period</text>
+        <svg class="flow flow-v" viewBox="0 0 190 210" preserveAspectRatio="xMidYMid meet">
+          ${SITES.map((s, i) => line(s, siteXs[i]))}
+          <circle cx="${gridX}" cy="${gridY}" r="24" fill="none" stroke="var(--brass-dim)" stroke-width="2.5" />
+          <text x="${gridX}" y="${gridY - 3}" text-anchor="middle" class="fl-w" style="fill:var(--brass)">${(totalPower / 1000).toFixed(2)}</text>
+          <text x="${gridX}" y="${gridY + 9}" text-anchor="middle" class="fl-u">kW</text>
+          <text x="${gridX}" y="${gridY + 42}" text-anchor="middle" class="fl-name" style="fill:var(--ink-dim)">GRID</text>
+          ${SITES.map((s, i) => node(s, siteXs[i]))}
+        </svg>
       `;
     };
 
     return html`
       <div class="flow-well">
         <div class="flow-cap">LIVE FLOW · <span>GRID → SITES</span></div>
-        <svg class="flow" viewBox="0 0 470 190" preserveAspectRatio="xMidYMid meet">
-          ${SITES.map((s, i) => line(s, rows[i]))}
-          <circle cx="52" cy="95" r="26" fill="none" stroke="var(--brass-dim)" stroke-width="2.5" />
-          <text x="52" y="92" text-anchor="middle" class="fl-w" style="fill:var(--brass)">
-            ${(totalPower / 1000).toFixed(2)}
-          </text>
-          <text x="52" y="104" text-anchor="middle" class="fl-u">kW</text>
-          <text x="52" y="140" text-anchor="middle" class="fl-name" style="fill:var(--ink-dim)">GRID</text>
-          ${SITES.map((s, i) => node(s, rows[i]))}
-        </svg>
+        ${horizontal()}
+        ${vertical()}
       </div>
     `;
   }
@@ -633,7 +702,9 @@ export class RvEnergyCard extends LitElement {
         text-transform: uppercase; color: var(--ink-faint);
       }
       .flow-cap span { color: var(--ledger); }
-      svg.flow { width: 100%; height: 190px; display: block; margin-top: 8px; }
+      svg.flow { width: 100%; margin-top: 8px; }
+      svg.flow-h { height: 190px; display: block; }
+      svg.flow-v { height: auto; display: none; }
       .fl-base { fill: none; stroke-width: 3; stroke-linecap: round; opacity: 0.28; }
       .fl-flow {
         fill: none; stroke-width: 3.5; stroke-linecap: round;
@@ -642,10 +713,10 @@ export class RvEnergyCard extends LitElement {
       }
       @keyframes fl-move { to { stroke-dashoffset: -38; } }
       @media (prefers-reduced-motion: reduce) { .fl-flow { animation: none; } }
-      .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 15px; font-weight: 700; }
-      .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 9px; }
-      .fl-name { font-family: var(--font-display); font-size: 13px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
-      .fl-kwh { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 10px; }
+      .fl-w { fill: var(--ink); font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+      .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
+      .fl-name { font-family: var(--font-display); font-size: 12px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
+      .fl-kwh { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 9px; }
       .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 26px 2px 12px; }
       .sec-head .idx { font-family: var(--font-mono); font-size: 11px; color: var(--brass); font-weight: 700; }
       .sec-head h2 {
@@ -686,6 +757,14 @@ export class RvEnergyCard extends LitElement {
       .recon-v.ledger { color: var(--ledger); }
       .recon-v.alert { color: var(--needle); }
       .recon-k2 { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 4px; }
+      .recon-edit { margin-top: 8px; }
+      .bill-input {
+        width: 100%; max-width: 120px; padding: 6px 8px; font-family: var(--font-mono);
+        font-size: 12px; color: var(--ink); background: var(--well); border: 1px solid var(--hairline);
+        border-radius: 4px;
+      }
+      .bill-input:focus { outline: none; border-color: var(--brass-dim); }
+      .edit-hint { font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); margin-left: 6px; }
       .var-note { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); margin-top: 16px; line-height: 1.6; }
       .var-note b { color: var(--ledger); font-weight: 700; }
       .var-note code { color: var(--brass); font-size: 11px; }
@@ -715,6 +794,12 @@ export class RvEnergyCard extends LitElement {
       @media (max-width: 760px) {
         .hero { flex-direction: column; align-items: stretch; }
         .head-right { width: 100%; justify-content: space-between; }
+      }
+      @media (max-width: 480px) {
+        .register-sub { font-size: 11px; word-wrap: break-word; overflow-wrap: break-word; }
+        .flow-well { padding: 12px; min-width: 0; }
+        svg.flow-h { display: none; }
+        svg.flow-v { display: block; }
       }
     `,
   ];
