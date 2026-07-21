@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.3.0';
+const CARD_VERSION = '0.4.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -222,7 +222,7 @@ export class RvEnergyCard extends LitElement {
               </div>
             </div>
             <div class="status ${gridOk ? '' : 'alert'}">
-              ● ${gridOk ? 'GRID OK' : `${customersOut} OUT`}
+              <span class="live-dot"></span>${gridOk ? 'GRID OK' : `${customersOut} OUT`}
             </div>
           </div>
 
@@ -231,8 +231,8 @@ export class RvEnergyCard extends LitElement {
               <div class="register-label">Cumulative — this billing period</div>
               <meter-register
                 .value=${periodKwh}
-                .digits=${6}
-                .decimals=${2}
+                .digits=${7}
+                .decimals=${3}
                 .mult=${`× MULT ${this._config.meter_multiplier}`}
                 unit="kWh"
               ></meter-register>
@@ -354,6 +354,7 @@ export class RvEnergyCard extends LitElement {
         letter-spacing: 0.04em; margin-top: 5px;
       }
       .status {
+        display: inline-flex; align-items: center; gap: 7px;
         font-family: var(--font-mono); font-size: 11px; font-weight: 700;
         letter-spacing: 0.08em; padding: 5px 10px; border-radius: 4px;
         color: var(--ledger); border: 1px solid #3d5236; background: rgba(120, 160, 110, 0.08);
@@ -361,6 +362,16 @@ export class RvEnergyCard extends LitElement {
       .status.alert {
         color: var(--needle); border-color: #5a2f2a; background: rgba(200, 72, 58, 0.09);
       }
+      .live-dot {
+        width: 7px; height: 7px; border-radius: 50%; background: currentColor;
+        box-shadow: 0 0 0 0 currentColor; animation: live-pulse 2s infinite;
+      }
+      @keyframes live-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(159, 191, 143, 0.5); }
+        70% { box-shadow: 0 0 0 6px rgba(159, 191, 143, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(159, 191, 143, 0); }
+      }
+      @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
       .register-row {
         display: flex; gap: 26px; align-items: center; flex-wrap: wrap;
       }
