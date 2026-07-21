@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.6.2';
+const CARD_VERSION = '0.6.3';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -83,10 +83,10 @@ export class RvEnergyCard extends LitElement {
       last_bill_energy_entity: 'input_number.last_coop_bill_energy_charge',
       last_bill_local_tax_entity: 'input_number.last_coop_bill_local_tax',
       last_bill_sc_tax_entity: 'input_number.last_coop_bill_sc_tax',
-      portal_url: 'https://billing.aikenco-op.org/onlineportal/Customer-Login',
-      bills_url: 'https://b3ck.me/drive/d/f/199RztKSB0unwLwGBCGyNOlM6yaSLEYz',
-      invoice_url_base: 'http://becknas.becknet:9000/invoices/invoice-',
       invoice_script: 'script.generate_monthly_invoice',
+      // Installation-specific URLs (portal, stored bills, invoice PDF base) are
+      // intentionally NOT defaulted here — set them in your dashboard card config.
+      // They point at private infrastructure and must not be baked into the repo.
       ...config,
     };
   }

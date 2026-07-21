@@ -36,9 +36,9 @@ export interface RvEnergyCardConfig {
   last_bill_energy_entity?: string; // co-op energy charge $ for the previous period
   last_bill_local_tax_entity?: string; // co-op local option tax $
   last_bill_sc_tax_entity?: string; // co-op SC sales tax $
-  portal_url?: string; // Aiken co-op login portal
-  bills_url?: string; // folder link to stored co-op bill PDFs
-  invoice_url_base?: string; // e.g. http://becknas.becknet:9000/invoices/invoice- (YYYY-MM.pdf appended)
+  portal_url?: string; // utility login portal (set in dashboard config)
+  bills_url?: string; // folder link to stored bill PDFs (set in dashboard config)
+  invoice_url_base?: string; // base URL for invoice PDFs; "YYYY-MM.pdf" appended (set in dashboard config)
   invoice_script?: string; // script to (re)generate the current invoice
   [key: string]: unknown;
 }
