@@ -1,6 +1,6 @@
 {
   "name": "ha-rv-energy-card",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Home Assistant Lovelace card: RV site power & billing overview — Meter Register design",
   "type": "module",
   "scripts": {

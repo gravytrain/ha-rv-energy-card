@@ -9,7 +9,7 @@ import type {
   StatisticRow,
 } from './types.js';
 
-const CARD_VERSION = '0.2.0';
+const CARD_VERSION = '0.3.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -55,7 +55,10 @@ const SITES: Site[] = [
 export class RvEnergyCard extends LitElement {
   @property({ attribute: false }) hass?: HomeAssistant;
   @state() private _config!: RvEnergyCardConfig;
+  /** Authoritative period-to-date kWh per site, from statistics (the baseline). */
   @state() private _stats: Partial<Record<Site['key'], number>> = {};
+  /** Live cumulative-sensor reading captured at the moment stats last loaded. */
+  private _statsAnchor: Partial<Record<Site['key'], number>> = {};
 
   private _statsTimer?: number;
   private _statsLoaded = false;
@@ -81,7 +84,8 @@ export class RvEnergyCard extends LitElement {
     if (changed.has('hass') && this.hass && !this._statsLoaded && this._config.use_statistics) {
       this._statsLoaded = true;
       this._loadStatistics();
-      this._statsTimer = window.setInterval(() => this._loadStatistics(), 300000);
+      // Refresh the authoritative baseline every 60s; live creep fills the gaps.
+      this._statsTimer = window.setInterval(() => this._loadStatistics(), 60000);
     }
   }
 
@@ -127,23 +131,48 @@ export class RvEnergyCard extends LitElement {
         types: ['change'],
       });
       const stats: Partial<Record<Site['key'], number>> = {};
+      const anchor: Partial<Record<Site['key'], number>> = {};
       for (const site of SITES) {
         const rows = result?.[site.stat];
         if (Array.isArray(rows) && rows.length) {
           let sum = rows.reduce((a, r) => a + (r.change || 0), 0);
           if (site.key === 'shed' && sum > 1000) sum = sum / 1000; // Wh → kWh
           stats[site.key] = sum;
+          // Capture the live cumulative reading NOW so we can add real-time creep
+          // on top of this authoritative baseline until the next stats refresh.
+          anchor[site.key] = this._liveCumulative(site);
         }
       }
       this._stats = stats;
+      this._statsAnchor = anchor;
     } catch {
       this._stats = {}; // fall back to live sensors
+      this._statsAnchor = {};
     }
   }
 
+  /** Live cumulative total-energy reading for a site (kWh), from its stat entity. */
+  private _liveCumulative(site: Site): number {
+    let v = this._num(site.stat);
+    if (site.key === 'shed' && v > 1000) v = v / 1000; // Wh → kWh
+    return v;
+  }
+
+  /**
+   * Period-to-date kWh for a site. Anchored to the authoritative statistics
+   * baseline, plus the live delta since that baseline was captured — so the
+   * register creeps upward in real time like a physical meter, and self-corrects
+   * to the accurate value on each statistics refresh.
+   */
   private _periodKwh(site: Site): number {
     if (this._config.use_statistics && this._stats[site.key] != null) {
-      return this._stats[site.key]!;
+      const baseline = this._stats[site.key]!;
+      const anchor = this._statsAnchor[site.key];
+      if (anchor != null) {
+        const creep = Math.max(0, this._liveCumulative(site) - anchor);
+        return baseline + creep;
+      }
+      return baseline;
     }
     let v = this._num(site.fallbackPeriod);
     if (site.key === 'shed' && v > 1000) v = v / 1000;
@@ -202,8 +231,8 @@ export class RvEnergyCard extends LitElement {
               <div class="register-label">Cumulative — this billing period</div>
               <meter-register
                 .value=${periodKwh}
-                .digits=${5}
-                .decimals=${1}
+                .digits=${6}
+                .decimals=${2}
                 .mult=${`× MULT ${this._config.meter_multiplier}`}
                 unit="kWh"
               ></meter-register>
