@@ -1021,6 +1021,11 @@ export class RvEnergyCard extends LitElement {
         .head-right { width: 100%; justify-content: space-between; }
         .grid-reading:first-child { border-left: none; }
       }
+      @media (max-width: 680px) {
+        .map-body { grid-template-columns: 1fr; }
+        .map-canvas { min-height: 360px; padding: 12px; }
+        .map-aside { border-left: 0; border-top: 1px solid var(--hairline); }
+      }
       @media (max-width: 480px) {
         .register-sub { font-size: 11px; word-wrap: break-word; overflow-wrap: break-word; }
         .flow-well { padding: 12px; min-width: 0; }
