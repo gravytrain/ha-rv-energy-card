@@ -30,13 +30,21 @@ export interface GridMetricConfig {
 }
 
 export interface OutageDetail {
+  outageRecID?: string;
   outageName?: string;
   outagePoint?: { lat?: number; lng?: number };
+  customersOutInitially?: number;
   customersOutNow?: number;
+  customersRestored?: number;
   crewAssigned?: boolean;
   outageStartTime?: string;
   estimatedTimeOfRestoral?: string | null;
   cause?: string | null;
+  outageWorkStatus?: string | null;
+  streetsAffected?: string | null;
+  outageModifiedTime?: string;
+  verified?: boolean;
+  isPlanned?: boolean;
 }
 
 export interface CountyStatus {

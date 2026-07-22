@@ -319,6 +319,16 @@ export class RvEnergyCard extends LitElement {
     return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : undefined;
   }
 
+  private _polygons(entityId: string): unknown[] {
+    const value = this.hass?.states[entityId]?.attributes.polygons;
+    return Array.isArray(value) ? value : [];
+  }
+
+  private _serviceArea(): GeoJSON.GeoJsonObject | undefined {
+    const value = this.hass?.states['sensor.aiken_co_op_service_area']?.attributes.geojson;
+    return value && typeof value === 'object' ? value as GeoJSON.GeoJsonObject : undefined;
+  }
+
   private _openMap = () => { this._mapOpen = true; };
   private _closeMap = () => { this._mapOpen = false; };
   private _selectOutage = (name?: string) => { this._selectedOutage = name; };
@@ -330,7 +340,7 @@ export class RvEnergyCard extends LitElement {
       const county = this._outageCounties()[0];
       return html`<div class="impact-summary"><span>ACTIVE IMPACT</span><b>${county ? `${county.name} County - ${Number(county.customersOutNow).toLocaleString()} / ${Number(county.customersServed ?? 0).toLocaleString()} members out` : outage ? `${Number(outage.customersOutNow ?? 0).toLocaleString()} members out` : 'No active outages reported'}</b>${outage ? html`<small>${outage.outageName ?? 'ACTIVE OUTAGE'} - ${outage.crewAssigned ? 'crew assigned' : 'awaiting crew'} - since ${this._fmtIncidentTime(outage.outageStartTime)}</small>` : nothing}<button @click=${this._openMap}>Open live map</button></div>`;
     }
-    return html`<rv-outage-map .counties=${this._allCounties()} .outages=${this._outages()} .selectedCounty=${this._selectedCounty ?? ''} .homeLocation=${this._homeLocation()}></rv-outage-map>`;
+    return html`<rv-outage-map .counties=${this._allCounties()} .outages=${this._outages()} .selectedCounty=${this._selectedCounty ?? ''} .homeLocation=${this._homeLocation()} .outagePolygons=${this._polygons('sensor.aiken_co_op_outage_polygons')} .plannedOutagePolygons=${this._polygons('sensor.aiken_co_op_planned_outage_polygons')} .serviceArea=${this._serviceArea()}></rv-outage-map>`;
   }
 
   private _renderFullMap() {
