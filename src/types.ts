@@ -31,6 +31,7 @@ export interface GridMetricConfig {
 
 export interface OutageDetail {
   outageName?: string;
+  outagePoint?: { lat?: number; lng?: number };
   customersOutNow?: number;
   crewAssigned?: boolean;
   outageStartTime?: string;
