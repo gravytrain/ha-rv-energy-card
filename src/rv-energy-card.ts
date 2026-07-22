@@ -5,11 +5,14 @@ import './meter-register.js';
 import { MeterRegister } from './meter-register.js';
 import type {
   HomeAssistant,
+  GridMetricConfig,
   RvEnergyCardConfig,
   StatisticRow,
+  OutageDetail,
+  CountyStatus,
 } from './types.js';
 
-const CARD_VERSION = '0.6.3';
+const CARD_VERSION = '0.7.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -57,6 +60,8 @@ export class RvEnergyCard extends LitElement {
   @state() private _config!: RvEnergyCardConfig;
   /** Authoritative period-to-date kWh per site, from statistics (the baseline). */
   @state() private _stats: Partial<Record<Site['key'], number>> = {};
+  /** Manual normal-state disclosure of the otherwise quiet grid-service panel. */
+  @state() private _gridExpanded = false;
   /** Live cumulative-sensor reading captured at the moment stats last loaded. */
   private _statsAnchor: Partial<Record<Site['key'], number>> = {};
   /** Monitored total kWh for the previous billing period (all sites), from statistics. */
@@ -74,6 +79,14 @@ export class RvEnergyCard extends LitElement {
       total_power_entity: 'sensor.total_site_power',
       grid_status_entity: 'sensor.aiken_co_op_outage_status',
       customers_out_entity: 'sensor.aiken_co_op_customers_out',
+      show_grid_status: true,
+      grid_metrics: [
+        { entity: 'sensor.aiken_co_op_customers_affected', name: 'Affected' },
+        { entity: 'sensor.aiken_co_op_customers_restored', name: 'Restored' },
+        { entity: 'sensor.aiken_co_op_planned_outages', name: 'Planned' },
+      ],
+      grid_map_url: 'https://map.aikenco-op.org/',
+      grid_map_link: 'https://map.aikenco-op.org/',
       base_rate_entity: 'input_number.base_electricity_rate',
       pca_rate_entity: 'input_number.current_pca_rate',
       meter_multiplier: 40,
@@ -228,6 +241,137 @@ export class RvEnergyCard extends LitElement {
     return `${a.toLocaleDateString('en-US', o)} → ${b.toLocaleDateString('en-US', o)}`;
   }
 
+  private _gridStatus(): string {
+    const state = this.hass?.states[this._config.grid_status_entity ?? '']?.state;
+    if (!state || state === 'unknown' || state === 'unavailable') return 'STATUS UNKNOWN';
+    return state.replace(/[_-]/g, ' ').toUpperCase();
+  }
+
+  private _lastUpdated(entityId?: string): string {
+    const raw = entityId ? this.hass?.states[entityId]?.last_updated : undefined;
+    if (!raw) return '—';
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  }
+
+  private _hasGridIssue(customersOut: number): boolean {
+    const state = this.hass?.states[this._config.grid_status_entity ?? '']?.state?.toLowerCase();
+    return customersOut > 0 || state === 'unknown' || state === 'unavailable';
+  }
+
+  private _hasMeaningfulValue(state: string): boolean {
+    const normalized = state.trim().toLowerCase();
+    if (['', '0', 'off', 'false', 'none', 'no', 'unknown', 'unavailable'].includes(normalized)) {
+      return false;
+    }
+    const numeric = Number(normalized);
+    return Number.isNaN(numeric) || numeric !== 0;
+  }
+
+  private _gridMetrics(hasGridIssue: boolean): GridMetricConfig[] {
+    return (this._config.grid_metrics ?? []).filter((metric): metric is GridMetricConfig => {
+      const entity = metric?.entity ? this.hass?.states[metric.entity] : undefined;
+      if (!entity) return false;
+      const when = metric.show_when ?? 'issue';
+      return when === 'always' || (when === 'issue' && hasGridIssue) ||
+        (when === 'nonzero' && this._hasMeaningfulValue(entity.state));
+    });
+  }
+
+  private _outages(): OutageDetail[] {
+    const outages = this.hass?.states['sensor.aiken_co_op_outage_details']?.attributes.outages;
+    return Array.isArray(outages) ? outages.filter((o): o is OutageDetail => !!o && typeof o === 'object') : [];
+  }
+
+  private _outageCounties(): CountyStatus[] {
+    const counties = this.hass?.states['sensor.aiken_co_op_county_status']?.attributes.counties;
+    if (!Array.isArray(counties)) return [];
+    return counties.filter((county): county is CountyStatus =>
+      !!county && typeof county === 'object' && Number(county.customersOutNow) > 0
+    );
+  }
+
+  private _fmtIncidentTime(value?: string): string {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('en-US', {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  }
+
+  private _renderGridStatus(gridOk: boolean, customersOut: number) {
+    const hasGridIssue = this._hasGridIssue(customersOut);
+    // Opening the badge is an explicit request for the full service snapshot.
+    const metrics = this._gridMetrics(hasGridIssue || this._gridExpanded);
+    const outages = this._outages();
+    const counties = this._outageCounties();
+    // In the normal state the header badge says everything actionable. Keep the
+    // detailed panel out of the way until the badge is explicitly opened.
+    if (!hasGridIssue && !this._gridExpanded) return nothing;
+    return html`
+      <div class="grid-status ${hasGridIssue ? 'alert' : ''}" aria-label="Grid service status">
+        <div class="grid-status-head">
+          <div class="grid-cap">GRID SERVICE · AIKEN CO-OP</div>
+          <div class="grid-state ${gridOk ? 'ok' : 'alert'}">
+            <span class="live-dot"></span>${gridOk ? 'SERVICE NORMAL' : 'OUTAGE REPORTED'}
+          </div>
+          <div class="grid-updated">UPDATED ${this._lastUpdated(this._config.grid_status_entity)}</div>
+        </div>
+        ${(hasGridIssue || this._gridExpanded) && this._config.grid_map_url
+          ? html`<div class="grid-map">
+              <iframe src="${this._config.grid_map_url}" title="Aiken Co-op live outage map" loading="lazy"></iframe>
+              <a href="${this._config.grid_map_link ?? this._config.grid_map_url}" target="_blank" rel="noopener noreferrer">Open live map ↗</a>
+            </div>`
+          : nothing}
+        <div class="grid-readings">
+          <div class="grid-reading">
+            <span class="grid-reading-k">Co-op status</span>
+            <b>${this._gridStatus()}</b>
+          </div>
+          <div class="grid-reading ${gridOk ? '' : 'alert'}">
+            <span class="grid-reading-k">Customers out</span>
+            <b>${customersOut.toLocaleString()}</b>
+          </div>
+          ${metrics.map((metric) => {
+            const entity = this.hass!.states[metric.entity];
+            const name = metric.name ?? entity.attributes.friendly_name ?? metric.entity;
+            const unit = metric.unit ?? entity.attributes.unit_of_measurement ?? '';
+            return html`
+              <div class="grid-reading">
+                <span class="grid-reading-k">${name}</span>
+                <b>${entity.state}${unit ? html` <small>${unit}</small>` : nothing}</b>
+              </div>
+            `;
+          })}
+        </div>
+        ${hasGridIssue && (outages.length || counties.length)
+          ? html`<div class="grid-incidents">
+              ${outages.map((outage) => html`
+                <div class="incident">
+                  <b>${outage.outageName ?? 'ACTIVE OUTAGE'}</b>
+                  <span>${Number(outage.customersOutNow ?? 0).toLocaleString()} out</span>
+                  <span>${outage.crewAssigned ? 'crew assigned' : 'awaiting crew'}</span>
+                  <span>since ${this._fmtIncidentTime(outage.outageStartTime)}</span>
+                  <span>ETR ${outage.estimatedTimeOfRestoral ?? 'TBD'}</span>
+                  ${outage.cause ? html`<span>${outage.cause}</span>` : nothing}
+                </div>
+              `)}
+              ${counties.length ? html`<div class="county-alerts">
+                ${counties.map((county) => html`<span>${county.name}: <b>${Number(county.customersOutNow).toLocaleString()}</b> / ${Number(county.customersServed ?? 0).toLocaleString()}</span>`)}
+              </div>` : nothing}
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private _toggleGridStatus = () => {
+    this._gridExpanded = !this._gridExpanded;
+  };
+
   // ---- render -------------------------------------------------------------
 
   render() {
@@ -246,7 +390,9 @@ export class RvEnergyCard extends LitElement {
     const usingStats = !!this._config.use_statistics && Object.keys(this._stats).length > 0;
 
     const customersOut = this._num(this._config.customers_out_entity);
-    const gridOk = customersOut === 0;
+    const gridIssue = this._hasGridIssue(customersOut);
+    const gridOk = !gridIssue;
+    const gridLabel = customersOut > 0 ? `${customersOut} OUT` : gridOk ? 'GRID OK' : 'GRID STATUS ?';
 
     return html`
       <div class="wrap">
@@ -271,9 +417,16 @@ export class RvEnergyCard extends LitElement {
                     >AIKEN PORTAL ↗</a
                   >`
                 : nothing}
-              <div class="status ${gridOk ? '' : 'alert'}">
-                <span class="live-dot"></span>${gridOk ? 'GRID OK' : `${customersOut} OUT`}
-              </div>
+              <button
+                class="status ${gridOk ? '' : 'alert'}"
+                type="button"
+                @click=${this._toggleGridStatus}
+                aria-expanded="${this._gridExpanded || gridIssue}"
+                aria-controls="grid-service-details"
+                title="${gridIssue ? 'Grid service details' : 'Open grid service details'}"
+              >
+                <span class="live-dot"></span>${gridLabel}
+              </button>
             </div>
           </div>
 
@@ -294,8 +447,11 @@ export class RvEnergyCard extends LitElement {
               </div>
             </div>
 
-            ${this._renderFlow(totalPower)}
+            ${this._config.show_flow ? this._renderFlow(totalPower) : nothing}
           </div>
+          ${this._config.show_grid_status
+            ? html`<div id="grid-service-details">${this._renderGridStatus(gridOk, customersOut)}</div>`
+            : nothing}
         </div>
 
         ${this._config.show_billing
@@ -677,7 +833,10 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-mono); font-size: 11px; font-weight: 700;
         letter-spacing: 0.08em; padding: 5px 10px; border-radius: 4px;
         color: var(--ledger); border: 1px solid #3d5236; background: rgba(120, 160, 110, 0.08);
+        cursor: pointer;
       }
+      button.status { appearance: none; }
+      .status:hover, .status:focus-visible { border-color: var(--brass-dim); outline: none; }
       .status.alert {
         color: var(--needle); border-color: #5a2f2a; background: rgba(200, 72, 58, 0.09);
       }
@@ -734,6 +893,50 @@ export class RvEnergyCard extends LitElement {
       .fl-u { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 8px; }
       .fl-name { font-family: var(--font-display); font-size: 12px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
       .fl-kwh { fill: var(--ink-dim); font-family: var(--font-mono); font-size: 9px; }
+
+      /* The grid-status page becomes source-health context for the live flow. */
+      .grid-status {
+        display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+        margin-top: 16px; padding: 14px 16px;
+        background: var(--well); border: 1px solid var(--hairline); border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,.25) inset;
+      }
+      .grid-status.alert { border-color: #5a2f2a; }
+      .grid-status-head { min-width: 190px; }
+      .grid-cap, .grid-reading-k, .grid-updated {
+        font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
+        text-transform: uppercase; color: var(--ink-faint);
+      }
+      .grid-state {
+        display: inline-flex; align-items: center; gap: 7px; margin-top: 7px;
+        font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: .07em;
+        color: var(--ledger);
+      }
+      .grid-state.alert, .grid-reading.alert b { color: var(--needle); }
+      .grid-updated { margin-top: 7px; letter-spacing: .06em; }
+      .grid-readings { display: flex; flex: 1; align-items: stretch; flex-wrap: wrap; }
+      .grid-reading {
+        flex: 1; min-width: 120px; padding: 1px 14px; border-left: 1px solid var(--hairline);
+        display: flex; flex-direction: column; gap: 5px;
+      }
+      .grid-reading b { font-family: var(--font-mono); font-size: 13px; color: var(--ink); }
+      .grid-reading small { color: var(--ink-dim); font-size: 10px; font-weight: 400; }
+      .grid-map {
+        position: relative; flex: 0 0 230px; height: 132px; overflow: hidden;
+        border: 1px solid var(--hairline); border-radius: 5px; background: #111;
+      }
+      .grid-map iframe { width: 100%; height: 100%; border: 0; display: block; }
+      .grid-map a {
+        position: absolute; right: 6px; bottom: 6px; padding: 4px 6px; border-radius: 3px;
+        background: rgba(20,22,27,.86); color: var(--ink); text-decoration: none;
+        font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em;
+      }
+      .grid-incidents { flex-basis: 100%; border-top: 1px solid var(--hairline); padding-top: 11px; }
+      .incident { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
+      .incident b { color: var(--needle); letter-spacing: .05em; }
+      .county-alerts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      .county-alerts span { font-family: var(--font-mono); font-size: 10px; color: var(--ink-dim); border: 1px solid var(--hairline); border-radius: 3px; padding: 4px 6px; }
+      .county-alerts b { color: var(--needle); }
       .sec-head { display: flex; align-items: baseline; gap: 12px; margin: 26px 2px 12px; }
       .sec-head .idx { font-family: var(--font-mono); font-size: 11px; color: var(--brass); font-weight: 700; }
       .sec-head h2 {
@@ -811,12 +1014,19 @@ export class RvEnergyCard extends LitElement {
       @media (max-width: 760px) {
         .hero { flex-direction: column; align-items: stretch; }
         .head-right { width: 100%; justify-content: space-between; }
+        .grid-reading:first-child { border-left: none; }
       }
       @media (max-width: 480px) {
         .register-sub { font-size: 11px; word-wrap: break-word; overflow-wrap: break-word; }
         .flow-well { padding: 12px; min-width: 0; }
         svg.flow-h { display: none; }
         svg.flow-v { display: block; }
+        .grid-status { gap: 12px; }
+        .grid-status-head { min-width: 0; width: 100%; }
+        .grid-map { flex-basis: 100%; height: 180px; }
+        .grid-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 0; }
+        .grid-reading { min-width: 0; padding: 1px 10px; }
+        .grid-reading:nth-child(odd) { border-left: none; }
       }
     `,
   ];

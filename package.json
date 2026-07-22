@@ -1,13 +1,18 @@
 {
   "name": "ha-rv-energy-card",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Home Assistant Lovelace card: RV site power & billing overview — Meter Register design",
   "type": "module",
   "scripts": {
     "build": "node esbuild.config.js",
     "watch": "node esbuild.config.js --watch"
   },
-  "keywords": ["home-assistant", "lovelace", "custom-card", "energy"],
+  "keywords": [
+    "home-assistant",
+    "lovelace",
+    "custom-card",
+    "energy"
+  ],
   "license": "MIT",
   "dependencies": {
     "lit": "^3.2.1"

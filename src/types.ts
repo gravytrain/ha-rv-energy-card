@@ -17,6 +17,33 @@ export interface HomeAssistant {
   user?: { name?: string };
 }
 
+/** A named reading migrated from the grid-status dashboard. */
+export interface GridMetricConfig {
+  /** Home Assistant entity supplying the reading. */
+  entity: string;
+  /** Label shown in the card. Defaults to the entity's friendly name. */
+  name?: string;
+  /** Optional unit override (otherwise the entity unit is used). */
+  unit?: string;
+  /** When to reveal the reading; defaults to `issue` to avoid normal-state noise. */
+  show_when?: 'issue' | 'always' | 'nonzero';
+}
+
+export interface OutageDetail {
+  outageName?: string;
+  customersOutNow?: number;
+  crewAssigned?: boolean;
+  outageStartTime?: string;
+  estimatedTimeOfRestoral?: string | null;
+  cause?: string | null;
+}
+
+export interface CountyStatus {
+  name?: string;
+  customersOutNow?: number;
+  customersServed?: number;
+}
+
 export interface RvEnergyCardConfig {
   type: string;
   billing_start_day?: number;
@@ -26,6 +53,14 @@ export interface RvEnergyCardConfig {
   total_power_entity?: string;
   grid_status_entity?: string;
   customers_out_entity?: string;
+  /** Show grid health next to site demand instead of on a separate page. */
+  show_grid_status?: boolean;
+  /** Additional readings from the grid-status dashboard. */
+  grid_metrics?: GridMetricConfig[];
+  /** Optional outage-map image, shown only when the grid has an issue. */
+  grid_map_url?: string;
+  /** Optional destination for the outage map. */
+  grid_map_link?: string;
   base_rate_entity?: string;
   pca_rate_entity?: string;
   meter_multiplier?: number;

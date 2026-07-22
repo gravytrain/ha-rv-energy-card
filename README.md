@@ -39,8 +39,9 @@ use_statistics: true
 
 ## Features
 
-- **Header** — billing-period range, day counter, and a live grid-status badge
-  (green `GRID OK`, red pulsing `N OUT` from the Aiken Co-op outage sensor)
+- **Integrated grid service** — co-op status, outage count, data freshness, and
+  selected grid-page readings sit directly beneath the live flow rather than on a
+  separate dashboard page.
 - **Status banner** — total site power now, today's kWh, period kWh + cost, with a
   per-site power stat cluster (North blue / South green / She-Shed purple)
 - **Live Power** — SVG circular gauges per site (instantaneous watts + today's kWh)
@@ -59,6 +60,10 @@ use_statistics: true
 | `total_power_entity` | `sensor.total_site_power` | Combined site power |
 | `grid_status_entity` | `sensor.aiken_co_op_outage_status` | Grid/outage status |
 | `customers_out_entity` | `sensor.aiken_co_op_customers_out` | Customers-out count (drives the badge) |
+| `show_grid_status` | `true` | Show the integrated grid-service readout |
+| `grid_metrics` | Affected / Restored / Planned | Other grid readings: `[{ entity, name?, unit?, show_when? }]` |
+| `grid_map_url` | `https://map.aikenco-op.org/` | Live outage map; only embedded for a grid issue |
+| `grid_map_link` | `https://map.aikenco-op.org/` | Optional URL opened from the map preview |
 | `base_rate_entity` | `input_number.base_electricity_rate` | Base $/kWh |
 | `pca_rate_entity` | `input_number.current_pca_rate` | PCA $/kWh adder |
 | `north_max_power` / `south_max_power` / `shed_max_power` | `5000` | Gauge full-scale watts per site |
@@ -74,3 +79,35 @@ use_statistics: true
 > Design rule: live sensors drive the real-time UI only; anything money depends on
 > (billing, cost) reads from the device-sourced statistics. See the Refoss backfill
 > design in the homeassistant-redesign repo for how those statistics are populated.
+
+### Migrating grid-page data
+
+The card now carries the useful parts of the former Grid Status page as an
+exception view: the live Aiken Co-op map, affected/restored/planned counts, active
+incident details, and counties currently affected. It opens automatically for an
+issue; while normal, click the header's `GRID OK` badge to open or close it on
+demand.
+
+Keep the co-op status and customers-out entities in their dedicated settings, and
+use `grid_metrics` only for further readings. Each metric uses its entity's
+friendly name and unit by default, or can be labelled explicitly:
+
+```yaml
+type: custom:rv-energy-card
+grid_metrics:
+  - entity: sensor.aiken_co_op_outage_count
+    name: Active outages
+    show_when: nonzero
+  - entity: sensor.aiken_co_op_last_refresh
+    name: Co-op data refresh
+    show_when: issue
+  - entity: sensor.grid_voltage
+    name: Supply voltage
+    unit: V
+    show_when: issue
+```
+
+`show_when` defaults to `issue`, so the top-right badge remains the entire
+normal-state experience. Use `nonzero` for a reading that is only useful when it
+has a non-zero value, or `always` for the rare reading that belongs on screen all
+the time. The map is an alert-only inline preview, not a separate dashboard card.
