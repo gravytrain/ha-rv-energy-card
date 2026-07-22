@@ -61,10 +61,6 @@ export class RvOutageMap extends LitElement {
         const selected = this._key(this.selectedCounty) === this._key(feature?.properties?.NAME as string | undefined);
         return { color: selected ? '#d9a441' : affected ? '#c8483a' : '#35506b', weight: selected ? 5 : affected ? 3 : 2, fill: true, fillColor: affected ? '#c8483a' : selected ? '#d9a441' : '#6d8faa', fillOpacity: affected ? 0.62 : selected ? 0.42 : 0.16 };
       },
-      onEachFeature: (feature, layer) => {
-        const name = String(feature.properties?.NAME ?? 'County');
-        layer.bindTooltip(name + ': ' + Number(counties.get(this._key(name))?.customersOutNow ?? 0).toLocaleString() + ' out', { sticky: true });
-      },
     }).addTo(this._layers);
     boundary.bringToFront();
     const activeFootprints = L.geoJSON(this._vendorFeatures(this.outagePolygons), {
