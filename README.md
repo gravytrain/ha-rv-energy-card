@@ -83,7 +83,7 @@ use_statistics: true
 ### Migrating grid-page data
 
 The card now carries the useful parts of the former Grid Status page as an
-exception view: the live Aiken Co-op map, affected/restored/planned counts, active
+exception view: a labelled active-impact summary, a Leaflet/OpenStreetMap county map, affected/restored/planned counts, active
 incident details, and counties currently affected. It opens automatically for an
 issue; while normal, click the header's `GRID OK` badge to open or close it on
 demand.
@@ -110,4 +110,4 @@ grid_metrics:
 `show_when` defaults to `issue`, so the top-right badge remains the entire
 normal-state experience. Use `nonzero` for a reading that is only useful when it
 has a non-zero value, or `always` for the rare reading that belongs on screen all
-the time. The map is an alert-only inline preview, not a separate dashboard card.
+the time. The inline area is a compact active-impact summary. Select Open live map for the Leaflet/OpenStreetMap territory view with locally bundled Census county polygons, live outage markers, and the vendor-map fallback.

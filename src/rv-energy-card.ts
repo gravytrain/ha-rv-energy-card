@@ -2,6 +2,7 @@ import { LitElement, html, svg, css, PropertyValues, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { tokens } from './styles.js';
 import './meter-register.js';
+import './outage-map.js';
 import { MeterRegister } from './meter-register.js';
 import type {
   HomeAssistant,
@@ -12,7 +13,7 @@ import type {
   CountyStatus,
 } from './types.js';
 
-const CARD_VERSION = '0.7.0';
+const CARD_VERSION = '0.9.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -55,14 +56,6 @@ const SITES: Site[] = [
 ];
 
 
-const COUNTY_CENTRES = [
-  { name: 'McCormick', lat: 33.92, lng: -82.29 }, { name: 'Greenwood', lat: 34.19, lng: -82.16 },
-  { name: 'Edgefield', lat: 33.78, lng: -82.00 }, { name: 'Saluda', lat: 34.01, lng: -81.77 },
-  { name: 'Aiken', lat: 33.57, lng: -81.72 }, { name: 'Lexington', lat: 33.91, lng: -81.31 },
-  { name: 'Barnwell', lat: 33.25, lng: -81.44 }, { name: 'Orangeburg', lat: 33.50, lng: -80.86 },
-  { name: 'Calhoun', lat: 33.67, lng: -80.78 },
-];
-const MAP_BOUNDS = { north: 34.31, south: 33.10, west: -82.43, east: -80.63 };
 @customElement('rv-energy-card')
 export class RvEnergyCard extends LitElement {
   @property({ attribute: false }) hass?: HomeAssistant;
@@ -318,25 +311,17 @@ export class RvEnergyCard extends LitElement {
     return Array.isArray(counties) ? counties.filter((c): c is CountyStatus => !!c && typeof c === 'object') : [];
   }
 
-  private _mapPoint(lat: number, lng: number, width: number, height: number) {
-    return { x: ((lng - MAP_BOUNDS.west) / (MAP_BOUNDS.east - MAP_BOUNDS.west)) * width, y: ((MAP_BOUNDS.north - lat) / (MAP_BOUNDS.north - MAP_BOUNDS.south)) * height };
-  }
-
   private _openMap = () => { this._mapOpen = true; };
   private _closeMap = () => { this._mapOpen = false; };
   private _selectOutage = (name?: string) => { this._selectedOutage = name; };
 
   private _renderTerritoryMap(compact = false) {
-    const width = compact ? 250 : 780, height = compact ? 132 : 500;
-    const counties = new Map(this._allCounties().map((c) => [c.name, c]));
-    const outages = this._outages();
-    return svg`<svg class="territory-map ${compact ? 'compact' : 'full'}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Aiken Co-op territory outage map">
-      <defs><pattern id="territory-grid" width="30" height="30" patternUnits="userSpaceOnUse"><path d="M30 0H0V30" fill="none" stroke="#333a44" stroke-width=".7"/></pattern><filter id="outage-glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-      <rect width="${width}" height="${height}" fill="url(#territory-grid)"/>
-      ${COUNTY_CENTRES.map((county) => { const {x,y}=this._mapPoint(county.lat,county.lng,width,height); const active=Number(counties.get(county.name)?.customersOutNow??0)>0; const r=Math.min(width,height)*.11; return svg`<g><polygon class="county ${active?'affected':''}" points="${x-r},${y-r*.3} ${x-r*.4},${y-r} ${x+r*.5},${y-r*.8} ${x+r},${y} ${x+r*.4},${y+r*.8} ${x-r*.5},${y+r*.8}"/>${compact?nothing:svg`<text x="${x}" y="${y+4}" text-anchor="middle" class="county-name">${county.name}</text>`}</g>`; })}
-      ${outages.map((outage) => { const p=outage.outagePoint; if(typeof p?.lat!=='number'||typeof p.lng!=='number') return nothing; const {x,y}=this._mapPoint(p.lat,p.lng,width,height); const selected=outage.outageName===(this._selectedOutage??outages[0]?.outageName); return svg`<g class="outage-marker ${selected?'selected':''}" @click=${()=>this._selectOutage(outage.outageName)}><circle class="outage-halo" cx="${x}" cy="${y}" r="${compact?8:13}" filter="url(#outage-glow)"/><circle class="outage-core" cx="${x}" cy="${y}" r="${compact?4:7}"/>${compact?nothing:svg`<text class="outage-label" x="${x+15}" y="${y-12}">${outage.outageName??'OUTAGE'} · ${outage.customersOutNow??0} OUT</text>`}</g>`; })}
-      ${!outages.length?svg`<text class="map-clear" x="${width/2}" y="${height/2}" text-anchor="middle">NO ACTIVE OUTAGES</text>`:nothing}
-    </svg>`;
+    if (compact) {
+      const outage = this._outages()[0];
+      const county = this._outageCounties()[0];
+      return html`<div class="impact-summary"><span>ACTIVE IMPACT</span><b>${county ? `${county.name} County - ${Number(county.customersOutNow).toLocaleString()} / ${Number(county.customersServed ?? 0).toLocaleString()} members out` : outage ? `${Number(outage.customersOutNow ?? 0).toLocaleString()} members out` : 'No active outages reported'}</b>${outage ? html`<small>${outage.outageName ?? 'ACTIVE OUTAGE'} - ${outage.crewAssigned ? 'crew assigned' : 'awaiting crew'} - since ${this._fmtIncidentTime(outage.outageStartTime)}</small>` : nothing}<button @click=${this._openMap}>Open live map</button></div>`;
+    }
+    return html`<rv-outage-map .counties=${this._allCounties()} .outages=${this._outages()}></rv-outage-map>`;
   }
 
   private _renderFullMap() {
@@ -973,7 +958,7 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em;
       }
       .grid-incidents { flex-basis: 100%; border-top: 1px solid var(--hairline); padding-top: 11px; }
-      .grid-map.native-map{padding:0;background:#11151b}.grid-map.native-map button{position:absolute;right:6px;bottom:6px;z-index:1;border:1px solid var(--hairline);border-radius:3px;padding:4px 6px;color:var(--ink);background:rgba(20,22,27,.88);font:9px var(--font-mono);cursor:pointer}.territory-map{width:100%;height:100%;display:block;background:#11151b}.county{fill:#202730;stroke:#4a5562;stroke-width:1.2}.county.affected{fill:#572e2a;stroke:var(--needle)}.county-name,.outage-label,.map-clear{fill:var(--ink-dim);font-family:var(--font-mono);font-size:12px}.outage-label{fill:var(--ink);font-size:11px}.outage-marker{cursor:pointer}.outage-halo{fill:rgba(200,72,58,.32)}.outage-core{fill:var(--needle);stroke:#fff0df;stroke-width:1.5}.outage-marker.selected .outage-core{fill:var(--brass)}.map-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:22px;background:rgba(4,5,7,.76)}.map-dialog{width:min(1100px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--bezel);border-radius:10px;background:var(--panel);box-shadow:0 30px 70px #000}.map-head{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--hairline)}.map-title{margin-top:4px;font-family:var(--font-display);font-size:23px;color:var(--ink)}.map-head a,.map-head button{color:var(--brass);background:none;border:0;text-decoration:none;font-family:var(--font-mono);cursor:pointer}.map-head button{margin-left:15px;font-size:26px;line-height:1}.map-summary{display:flex;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hairline)}.map-summary span{padding:2px 16px;border-left:1px solid var(--hairline);color:var(--ink-dim);font:10px var(--font-mono)}.map-summary span:first-child{border-left:0;padding-left:0}.map-summary b{color:var(--needle);font-size:14px}.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:480px}.map-canvas{min-height:420px;padding:18px}.map-aside{padding:18px;border-left:1px solid var(--hairline);background:var(--well)}.aside-cap{margin:0 0 9px;color:var(--ink-faint);font:9px var(--font-mono);letter-spacing:.14em;text-transform:uppercase}.map-incident{width:100%;margin-bottom:7px;padding:9px;text-align:left;border:1px solid var(--hairline);border-radius:4px;background:transparent;color:var(--ink);cursor:pointer}.map-incident.selected{border-color:var(--needle);background:rgba(200,72,58,.08)}.map-incident b,.map-incident span{display:block}.map-incident b{font:11px var(--font-mono)}.map-incident span,.selected-detail span{color:var(--ink-dim);font:10px var(--font-mono)}.selected-detail{display:grid;gap:3px;padding:10px 0 16px}.selected-detail b{font:12px var(--font-mono);color:var(--ink)}.map-counties{display:grid;gap:4px}.map-counties span{display:flex;justify-content:space-between;color:var(--ink-dim);font:10px var(--font-mono)}.map-counties span.affected b{color:var(--needle)}
+      .impact-summary{flex:0 0 230px;display:flex;flex-direction:column;gap:5px;padding:12px;border:1px solid var(--hairline);border-radius:5px;background:#11151b;font-family:var(--font-mono)}.impact-summary span{font-size:9px;letter-spacing:.14em;color:var(--ink-faint)}.impact-summary b{font-size:11px;color:var(--ink)}.impact-summary small{font-size:10px;color:var(--ink-dim)}.impact-summary button{align-self:start;padding:0;border:0;background:none;color:var(--brass);font:10px var(--font-mono);cursor:pointer}.grid-map.native-map{padding:0;background:#11151b}.grid-map.native-map button{position:absolute;right:6px;bottom:6px;z-index:1;border:1px solid var(--hairline);border-radius:3px;padding:4px 6px;color:var(--ink);background:rgba(20,22,27,.88);font:9px var(--font-mono);cursor:pointer}.territory-map{width:100%;height:100%;display:block;background:#11151b}.county{fill:#202730;stroke:#4a5562;stroke-width:1.2}.county.affected{fill:#572e2a;stroke:var(--needle)}.county-name,.outage-label,.map-clear{fill:var(--ink-dim);font-family:var(--font-mono);font-size:12px}.outage-label{fill:var(--ink);font-size:11px}.outage-marker{cursor:pointer}.outage-halo{fill:rgba(200,72,58,.32)}.outage-core{fill:var(--needle);stroke:#fff0df;stroke-width:1.5}.outage-marker.selected .outage-core{fill:var(--brass)}.map-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:22px;background:rgba(4,5,7,.76)}.map-dialog{width:min(1100px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--bezel);border-radius:10px;background:var(--panel);box-shadow:0 30px 70px #000}.map-head{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--hairline)}.map-title{margin-top:4px;font-family:var(--font-display);font-size:23px;color:var(--ink)}.map-head a,.map-head button{color:var(--brass);background:none;border:0;text-decoration:none;font-family:var(--font-mono);cursor:pointer}.map-head button{margin-left:15px;font-size:26px;line-height:1}.map-summary{display:flex;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hairline)}.map-summary span{padding:2px 16px;border-left:1px solid var(--hairline);color:var(--ink-dim);font:10px var(--font-mono)}.map-summary span:first-child{border-left:0;padding-left:0}.map-summary b{color:var(--needle);font-size:14px}.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:480px}.map-canvas{min-height:420px;padding:18px}.map-aside{padding:18px;border-left:1px solid var(--hairline);background:var(--well)}.aside-cap{margin:0 0 9px;color:var(--ink-faint);font:9px var(--font-mono);letter-spacing:.14em;text-transform:uppercase}.map-incident{width:100%;margin-bottom:7px;padding:9px;text-align:left;border:1px solid var(--hairline);border-radius:4px;background:transparent;color:var(--ink);cursor:pointer}.map-incident.selected{border-color:var(--needle);background:rgba(200,72,58,.08)}.map-incident b,.map-incident span{display:block}.map-incident b{font:11px var(--font-mono)}.map-incident span,.selected-detail span{color:var(--ink-dim);font:10px var(--font-mono)}.selected-detail{display:grid;gap:3px;padding:10px 0 16px}.selected-detail b{font:12px var(--font-mono);color:var(--ink)}.map-counties{display:grid;gap:4px}.map-counties span{display:flex;justify-content:space-between;color:var(--ink-dim);font:10px var(--font-mono)}.map-counties span.affected b{color:var(--needle)}
       .incident { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
       .incident b { color: var(--needle); letter-spacing: .05em; }
       .county-alerts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }

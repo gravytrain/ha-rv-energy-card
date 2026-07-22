@@ -11,6 +11,7 @@ const options = {
   target: 'es2021',
   minify: true,
   sourcemap: false,
+  loader: { '.geojson': 'json' },
   legalComments: 'none',
   banner: {
     js: '/* ha-rv-energy-card — bundled (Lit inlined). Source: src/. Do not edit dist/ by hand. */',
