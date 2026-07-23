@@ -13,7 +13,7 @@ import type {
   CountyStatus,
 } from './types.js';
 
-const CARD_VERSION = '0.10.3';
+const CARD_VERSION = '0.10.4';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -429,7 +429,7 @@ export class RvEnergyCard extends LitElement {
             <div class="brand">
               <div class="glyph">⌁</div>
               <div>
-                <h1>RV ENERGY</h1>
+                <h1>ENERGY</h1>
                 <div class="acct">
                   AIKEN CO-OP · REG ${this._fmtRange(start, end)} · DAY ${daysElapsed}/${daysTotal}
                 </div>
@@ -1113,7 +1113,7 @@ void MeterRegister;
 (window as unknown as { customCards?: unknown[] }).customCards ||= [];
 (window as unknown as { customCards: unknown[] }).customCards.push({
   type: 'rv-energy-card',
-  name: 'RV Energy',
+  name: 'Energy',
   description: 'Meter-register site power & billing overview (gap-proof statistics)',
   preview: true,
 });
