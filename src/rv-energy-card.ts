@@ -13,7 +13,7 @@ import type {
   CountyStatus,
 } from './types.js';
 
-const CARD_VERSION = '0.9.0';
+const CARD_VERSION = '0.10.3';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -71,6 +71,8 @@ export class RvEnergyCard extends LitElement {
   private _statsAnchor: Partial<Record<Site['key'], number>> = {};
   /** Monitored total kWh for the previous billing period (all sites), from statistics. */
   @state() private _lastPeriodMonitored?: number;
+  /** Per-site statistics for the previous billing period, used for bill allocation. */
+  @state() private _lastPeriodStats: Partial<Record<Site['key'], number>> = {};
 
   private _statsTimer?: number;
   private _statsLoaded = false;
@@ -194,17 +196,21 @@ export class RvEnergyCard extends LitElement {
           types: ['change'],
         });
         let total = 0;
+        const bySite: Partial<Record<Site['key'], number>> = {};
         for (const site of SITES) {
           const rows = prev?.[site.stat];
           if (Array.isArray(rows) && rows.length) {
             let sum = rows.reduce((a, r) => a + (r.change || 0), 0);
             if (site.key === 'shed' && sum > 1000) sum = sum / 1000;
             total += sum;
+            bySite[site.key] = sum;
           }
         }
         this._lastPeriodMonitored = total;
+        this._lastPeriodStats = bySite;
       } catch {
         this._lastPeriodMonitored = undefined;
+        this._lastPeriodStats = {};
       }
     }
   }
@@ -544,6 +550,14 @@ export class RvEnergyCard extends LitElement {
     const varPct = billed > 0 ? (varKwh / billed) * 100 : 0;
     const within = Math.abs(varPct) <= 2;
     const sign = varKwh >= 0 ? '+' : '';
+    const northAndShed = (this._lastPeriodStats.north ?? 0) + (this._lastPeriodStats.shed ?? 0);
+    const south = this._lastPeriodStats.south ?? 0;
+    const allocation = (kwh: number) => {
+      const share = monitored > 0 ? kwh / monitored : 0;
+      return { share, billedKwh: billed * share, total: billTotal * share };
+    };
+    const inLaws = allocation(northAndShed);
+    const ours = allocation(south);
 
     return html`
       <div class="sec-head">
@@ -597,6 +611,21 @@ export class RvEnergyCard extends LitElement {
                   : html`Monitored total is <b>${sign}${varPct.toFixed(1)}%</b> off the co-op
                       bill — worth a look.`}
               </div>
+              ${northAndShed > 0 && south > 0
+                ? html`<div class="allocation" aria-label="Last billing period allocation">
+                    <div class="allocation-head">Last-period allocation · tax included</div>
+                    <div class="allocation-row">
+                      <span><i class="dot north"></i><i class="dot shed"></i>North + She-Shed</span>
+                      <span>${northAndShed.toFixed(1)} kWh · ${(inLaws.share * 100).toFixed(1)}%</span>
+                      <b>${inLaws.billedKwh.toFixed(1)} billed kWh · &#36;${inLaws.total.toFixed(2)}</b>
+                    </div>
+                    <div class="allocation-row">
+                      <span><i class="dot south"></i>South</span>
+                      <span>${south.toFixed(1)} kWh · ${(ours.share * 100).toFixed(1)}%</span>
+                      <b>${ours.billedKwh.toFixed(1)} billed kWh · &#36;${ours.total.toFixed(2)}</b>
+                    </div>
+                  </div>`
+                : nothing}
             `
           : html`<div class="var-note">
               Set <code>${this._config.last_bill_kwh_entity}</code> to the co-op's billed kWh to
@@ -1034,6 +1063,13 @@ export class RvEnergyCard extends LitElement {
       .invoice-row:last-child { border-bottom: none; }
       .invoice-row .p { color: var(--ink); }
       .invoice-row a { color: var(--brass); text-decoration: none; font-weight: 700; }
+      .allocation { margin-top: 12px; border-top: 1px solid var(--hairline); font-family: var(--font-mono); }
+      .allocation-head { padding: 10px 0 7px; color: var(--ink-faint); font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
+      .allocation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid color-mix(in srgb, var(--hairline) 65%, transparent); color: var(--ink-dim); font-size: 11px; }
+      .allocation-row:first-of-type { border-top: 0; }
+      .allocation-row b { color: var(--ink); font-weight: 600; text-align: right; }
+      .dot { display: inline-block; width: 7px; height: 7px; margin: 0 4px 0 0; border-radius: 50%; vertical-align: 1px; }
+      .dot.north { background: var(--north); }.dot.shed { background: var(--shed); }.dot.south { background: var(--south); }
 
       @media (max-width: 760px) {
         .hero { flex-direction: column; align-items: stretch; }
@@ -1056,6 +1092,8 @@ export class RvEnergyCard extends LitElement {
         .grid-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 0; }
         .grid-reading { min-width: 0; padding: 1px 10px; }
         .grid-reading:nth-child(odd) { border-left: none; }
+        .allocation-row { grid-template-columns: 1fr auto; gap: 5px 10px; }
+        .allocation-row b { grid-column: 1 / -1; text-align: left; }
       }
     `,
   ];
