@@ -11,9 +11,10 @@ import type {
   StatisticRow,
   OutageDetail,
   CountyStatus,
+  WeatherAlert,
 } from './types.js';
 
-const CARD_VERSION = '0.10.4';
+const CARD_VERSION = '0.11.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -94,6 +95,8 @@ export class RvEnergyCard extends LitElement {
       ],
       grid_map_url: 'https://map.aikenco-op.org/',
       grid_map_link: 'https://map.aikenco-op.org/',
+      weather_alert_entity: 'sensor.nws_wagener_power_weather_alerts',
+      show_weather_alerts: true,
       base_rate_entity: 'input_number.base_electricity_rate',
       pca_rate_entity: 'input_number.current_pca_rate',
       meter_multiplier: 40,
@@ -282,6 +285,56 @@ export class RvEnergyCard extends LitElement {
     return Number.isNaN(numeric) || numeric !== 0;
   }
 
+  private _weatherAlerts(): WeatherAlert[] {
+    const attributes = this.hass?.states[this._config.weather_alert_entity ?? '']?.attributes;
+    const alerts = attributes?.alerts ?? attributes?.features;
+    return Array.isArray(alerts)
+      ? alerts.filter((alert): alert is WeatherAlert => !!alert && typeof alert === 'object')
+      : [];
+  }
+
+  private _weatherUnavailable(): boolean {
+    const state = this.hass?.states[this._config.weather_alert_entity ?? '']?.state?.toLowerCase();
+    return !state || state === 'unknown' || state === 'unavailable';
+  }
+
+  private _fmtAlertTime(value?: string): string {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('en-US', {
+      weekday: 'short', hour: 'numeric', minute: '2-digit',
+    });
+  }
+
+  private _renderWeatherStatus() {
+    const alerts = this._weatherAlerts();
+    const unavailable = this._weatherUnavailable();
+    const active = alerts.length > 0;
+    const primary = alerts[0]?.properties;
+    const state = unavailable ? 'NWS STATUS UNKNOWN' : active ? `${alerts.length} ACTIVE ALERT${alerts.length === 1 ? '' : 'S'}` : 'NO ACTIVE ALERTS';
+    const detail = primary?.headline || primary?.description || 'No NWS weather alerts are active for the RV area.';
+    return html`
+      <div class="weather-status ${active || unavailable ? 'alert' : ''}" aria-label="National Weather Service power weather status">
+        <div class="weather-status-head">
+          <div class="grid-cap">POWER WEATHER · NWS WAGENER AREA</div>
+          <div class="grid-state ${active || unavailable ? 'alert' : 'ok'}">
+            <span class="live-dot"></span>${state}
+          </div>
+          <div class="grid-updated">UPDATED ${this._lastUpdated(this._config.weather_alert_entity)}</div>
+        </div>
+        <div class="weather-readings">
+          ${active ? alerts.map((alert) => html`
+            <div class="weather-alert">
+              <b>${alert.properties?.event ?? 'Weather alert'}</b>
+              <span>${alert.properties?.severity ?? 'Unknown severity'} · expires ${this._fmtAlertTime(alert.properties?.expires)}</span>
+            </div>
+          `) : html`<div class="weather-alert clear"><b>${unavailable ? 'Check NWS source' : 'Monitoring for lightning, severe storms, tornadoes & hurricanes'}</b><span>${detail}</span></div>`}
+        </div>
+        ${active ? html`<div class="weather-detail">${detail}${primary?.instruction ? html`<span><b>Recommended action:</b> ${primary.instruction}</span>` : nothing}</div>` : nothing}
+      </div>
+    `;
+  }
+
   private _gridMetrics(hasGridIssue: boolean): GridMetricConfig[] {
     return (this._config.grid_metrics ?? []).filter((metric): metric is GridMetricConfig => {
       const entity = metric?.entity ? this.hass?.states[metric.entity] : undefined;
@@ -421,6 +474,7 @@ export class RvEnergyCard extends LitElement {
     const gridIssue = this._hasGridIssue(customersOut);
     const gridOk = !gridIssue;
     const gridLabel = customersOut > 0 ? `${customersOut} OUT` : gridOk ? 'GRID OK' : 'GRID STATUS ?';
+    const weatherAlert = this._weatherAlerts().length > 0;
 
     return html`
       <div class="wrap">
@@ -455,6 +509,7 @@ export class RvEnergyCard extends LitElement {
               >
                 <span class="live-dot"></span>${gridLabel}
               </button>
+              ${this._config.show_weather_alerts ? html`<span class="status ${weatherAlert ? 'alert' : ''}" title="National Weather Service alert status"><span class="live-dot"></span>${weatherAlert ? 'WX ALERT' : 'WX CLEAR'}</span>` : nothing}
             </div>
           </div>
 
@@ -480,6 +535,7 @@ export class RvEnergyCard extends LitElement {
           ${this._config.show_grid_status
             ? html`<div id="grid-service-details">${this._renderGridStatus(gridOk, customersOut)}</div>`
             : nothing}
+          ${this._config.show_weather_alerts ? this._renderWeatherStatus() : nothing}
         </div>
 
         ${this._config.show_billing
@@ -954,6 +1010,22 @@ export class RvEnergyCard extends LitElement {
         box-shadow: 0 2px 5px rgba(0,0,0,.25) inset;
       }
       .grid-status.alert { border-color: #5a2f2a; }
+      .weather-status {
+        display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+        margin-top: 12px; padding: 14px 16px;
+        background: var(--well); border: 1px solid var(--hairline); border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,.25) inset;
+      }
+      .weather-status.alert { border-color: #5a2f2a; }
+      .weather-status-head { min-width: 190px; }
+      .weather-readings { display: flex; flex: 1; gap: 8px; flex-wrap: wrap; min-width: 180px; }
+      .weather-alert { min-width: 145px; padding: 4px 12px; border-left: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 4px; }
+      .weather-alert:first-child { border-left: 0; }
+      .weather-alert b { color: var(--needle); font: 700 12px var(--font-mono); }
+      .weather-alert.clear b { color: var(--ledger); }
+      .weather-alert span, .weather-detail { color: var(--ink-dim); font: 10px/1.45 var(--font-mono); }
+      .weather-detail { flex: 1 0 100%; border-top: 1px solid var(--hairline); padding-top: 10px; }
+      .weather-detail span { display: block; margin-top: 5px; color: var(--ink); }
       .grid-status-head { min-width: 190px; }
       .grid-cap, .grid-reading-k, .grid-updated {
         font-family: var(--font-mono); font-size: 9px; letter-spacing: .14em;
@@ -1088,6 +1160,9 @@ export class RvEnergyCard extends LitElement {
         svg.flow-v { display: block; }
         .grid-status { gap: 12px; }
         .grid-status-head { min-width: 0; width: 100%; }
+        .weather-status { gap: 12px; }
+        .weather-status-head { min-width: 0; width: 100%; }
+        .weather-alert { border-left: 0; padding: 2px 0; }
         .grid-map { flex-basis: 100%; height: 180px; }
         .grid-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 0; }
         .grid-reading { min-width: 0; padding: 1px 10px; }

@@ -42,6 +42,9 @@ use_statistics: true
 - **Integrated grid service** — co-op status, outage count, data freshness, and
   selected grid-page readings sit directly beneath the live flow rather than on a
   separate dashboard page.
+- **Power-weather monitor** — active NWS alerts for the Wagener area (including
+  thunderstorm, tornado, hurricane, flood, and high-wind events) appear alongside
+  grid conditions; the included HA package can notify your phone when an alert changes.
 - **Status banner** — total site power now, today's kWh, period kWh + cost, with a
   per-site power stat cluster (North blue / South green / She-Shed purple)
 - **Live Power** — SVG circular gauges per site (instantaneous watts + today's kWh)
@@ -64,6 +67,8 @@ use_statistics: true
 | `grid_metrics` | Affected / Restored / Planned | Other grid readings: `[{ entity, name?, unit?, show_when? }]` |
 | `grid_map_url` | `https://map.aikenco-op.org/` | Live outage map; only embedded for a grid issue |
 | `grid_map_link` | `https://map.aikenco-op.org/` | Optional URL opened from the map preview |
+| `weather_alert_entity` | `sensor.nws_wagener_power_weather_alerts` | NWS active-alert sensor for the RV location |
+| `show_weather_alerts` | `true` | Show the NWS power-weather monitor |
 | `base_rate_entity` | `input_number.base_electricity_rate` | Base $/kWh |
 | `pca_rate_entity` | `input_number.current_pca_rate` | PCA $/kWh adder |
 | `north_max_power` / `south_max_power` / `shed_max_power` | `5000` | Gauge full-scale watts per site |
@@ -111,3 +116,13 @@ grid_metrics:
 normal-state experience. Use `nonzero` for a reading that is only useful when it
 has a non-zero value, or `always` for the rare reading that belongs on screen all
 the time. The inline area is a compact active-impact summary. Select Open live map for the Leaflet/OpenStreetMap territory view with locally bundled Census county polygons, live outage markers, and the vendor-map fallback.
+
+
+### NWS weather alerts and notifications
+
+The included [aiken-coop-outage-monitoring.yaml](aiken-coop-outage-monitoring.yaml) also defines
+`sensor.nws_wagener_power_weather_alerts`. It polls the official NWS active-alert API every five
+minutes for the Wagener/RV coordinates, retains the event, severity, expiry, headline, and safety
+instructions, and sends one notification whenever the set of active alerts changes. Before enabling
+the package, replace `notify.mobile_app_your_phone` with your actual mobile-app notification service.
+The card needs no extra configuration unless you use a different entity id or location.

@@ -53,6 +53,23 @@ export interface CountyStatus {
   customersServed?: number;
 }
 
+/** An active alert from the National Weather Service alerts API. */
+export interface WeatherAlert {
+  id?: string;
+  properties?: {
+    event?: string;
+    headline?: string;
+    severity?: string;
+    urgency?: string;
+    description?: string;
+    instruction?: string;
+    effective?: string;
+    expires?: string;
+    senderName?: string;
+    areaDesc?: string;
+  };
+}
+
 export interface RvEnergyCardConfig {
   type: string;
   billing_start_day?: number;
@@ -70,6 +87,8 @@ export interface RvEnergyCardConfig {
   grid_map_url?: string;
   /** Optional destination for the outage map. */
   grid_map_link?: string;
+  weather_alert_entity?: string;
+  show_weather_alerts?: boolean;
   base_rate_entity?: string;
   pca_rate_entity?: string;
   meter_multiplier?: number;

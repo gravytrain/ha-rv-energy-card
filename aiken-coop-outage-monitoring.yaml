@@ -1,0 +1,219 @@
+# Aiken Co-op outage monitoring
+# Copy this into configuration.yaml (or adapt it to your package layout).
+
+script: !include scripts.yaml
+
+rest:
+  # NWS active alerts covering the RV/Wagener area. Coordinates are intentionally
+  # used instead of a county zone so polygon-based warnings are included.
+  - resource: "https://api.weather.gov/alerts/active?point=33.6500,-81.3600"
+    headers:
+      User-Agent: "Home Assistant RV Energy Card (local weather monitoring)"
+      Accept: "application/geo+json"
+    scan_interval: 300
+    sensor:
+      - name: "NWS Wagener Power Weather Alerts"
+        unique_id: nws_wagener_power_weather_alerts
+        value_template: >-
+          {% set alerts = value_json.features | default([], true) %}
+          {% if alerts | count == 0 %}clear{% else %}
+            {{ alerts | map(attribute='id') | join('|') | truncate(250, true, '') }}
+          {% endif %}
+        icon: mdi:weather-lightning-rainy
+        json_attributes:
+          - "features"
+  - resource: https://map.aikenco-op.org/data/outageSummary.json?v=2
+    verify_ssl: false
+    scan_interval: 60
+    sensor:
+      - name: "Aiken Co-op Customers Out"
+        value_template: "{{ value_json.customersOutNow | default(0) }}"
+        unit_of_measurement: "customers"
+        icon: mdi:flash-alert
+      - name: "Aiken Co-op Customers Affected"
+        value_template: "{{ value_json.customersAffected | default(0) }}"
+        unit_of_measurement: "customers"
+        icon: mdi:flash-alert-outline
+      - name: "Aiken Co-op Customers Restored"
+        value_template: "{{ value_json.customersRestored | default(0) }}"
+        unit_of_measurement: "customers"
+        icon: mdi:flash-check
+      - name: "Aiken Co-op Customers Served"
+        value_template: "{{ value_json.customersServed | default(0) }}"
+        unit_of_measurement: "customers"
+        icon: mdi:home-group
+      - name: "Aiken Co-op Outage Update Time"
+        value_template: "{{ value_json.updateTime | default('unknown') }}"
+        icon: mdi:clock-outline
+
+rest_command:
+  generate_invoice:
+    url: "http://becknas.becknet:9000/hooks/generate-invoice"
+    method: POST
+    content_type: "application/json"
+    timeout: 60
+    payload: >-
+      {
+        "period_start": "{{ period_start }}",
+        "period_end": "{{ period_end }}",
+        "north_kwh": {{ north_kwh }},
+        "shed_kwh": {{ shed_kwh }},
+        "effective_rate": {{ effective_rate }},
+        "base_rate": {{ base_rate }},
+        "pca_rate": {{ pca_rate }},
+        "local_tax_pct": {{ local_tax_pct }},
+        "sc_tax_pct": {{ sc_tax_pct }}
+      }
+
+  fetch_aiken_outages:
+    url: "https://map.aikenco-op.org/data/outages.json?v=2"
+    method: GET
+    verify_ssl: false
+
+  fetch_aiken_boundaries:
+    url: "https://map.aikenco-op.org/data/boundaries.json?v=2"
+    method: GET
+    verify_ssl: false
+
+  fetch_aiken_planned_outages:
+    url: "https://map.aikenco-op.org/data/plannedOutages.json?v=2"
+    method: GET
+    verify_ssl: false
+
+  fetch_aiken_outage_polygons:
+    url: "https://map.aikenco-op.org/data/outagePolygons.json?v=2"
+    method: GET
+    verify_ssl: false
+
+  fetch_aiken_planned_outage_polygons:
+    url: "https://map.aikenco-op.org/data/plannedOutagePolygons.json?v=2"
+    method: GET
+    verify_ssl: false
+
+  fetch_aiken_service_area:
+    url: "https://map.aikenco-op.org/data/Service%20Area.json?v=2"
+    method: GET
+    verify_ssl: false
+
+template:
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/1"
+    actions:
+      - action: rest_command.fetch_aiken_outages
+        response_variable: outages_response
+      - action: rest_command.fetch_aiken_boundaries
+        response_variable: boundaries_response
+      - action: rest_command.fetch_aiken_planned_outages
+        response_variable: planned_response
+      - action: rest_command.fetch_aiken_outage_polygons
+        response_variable: outage_polygons_response
+      - action: rest_command.fetch_aiken_planned_outage_polygons
+        response_variable: planned_outage_polygons_response
+      - action: rest_command.fetch_aiken_service_area
+        response_variable: service_area_response
+
+    sensor:
+      - name: "Aiken Co-op Outage Details"
+        unique_id: aiken_coop_outage_details
+        state: >-
+          {{ outages_response.content | count
+             if outages_response.content is defined else 0 }}
+        unit_of_measurement: "outages"
+        icon: mdi:alert-circle
+        attributes:
+          outages: >-
+            {{ outages_response.content
+               if outages_response.content is defined else [] }}
+
+      - name: "Aiken Co-op County Status"
+        unique_id: aiken_coop_county_status
+        state: >-
+          {% set data = boundaries_response.content if boundaries_response.content is defined else [] %}
+          {% set counties = data[0].boundaries if data | count > 0 else [] %}
+          {{ counties | selectattr('customersOutNow', 'gt', 0) | list | count }}
+        unit_of_measurement: "counties"
+        icon: mdi:map-marker-multiple
+        attributes:
+          counties: >-
+            {% set data = boundaries_response.content if boundaries_response.content is defined else [] %}
+            {{ data[0].boundaries if data | count > 0 else [] }}
+
+      - name: "Aiken Co-op Planned Outages"
+        unique_id: aiken_coop_planned_outages
+        state: >-
+          {{ planned_response.content | count
+             if planned_response.content is defined else 0 }}
+        unit_of_measurement: "planned"
+        icon: mdi:calendar-clock
+        attributes:
+          outages: >-
+            {{ planned_response.content
+               if planned_response.content is defined else [] }}
+
+      - name: "Aiken Co-op Outage Polygons"
+        unique_id: aiken_coop_outage_polygons
+        state: >-
+          {{ outage_polygons_response.content | count
+             if outage_polygons_response.content is defined else 0 }}
+        unit_of_measurement: "polygons"
+        icon: mdi:vector-polygon
+        attributes:
+          polygons: >-
+            {{ outage_polygons_response.content
+               if outage_polygons_response.content is defined else [] }}
+
+      - name: "Aiken Co-op Planned Outage Polygons"
+        unique_id: aiken_coop_planned_outage_polygons
+        state: >-
+          {{ planned_outage_polygons_response.content | count
+             if planned_outage_polygons_response.content is defined else 0 }}
+        unit_of_measurement: "polygons"
+        icon: mdi:vector-polygon
+        attributes:
+          polygons: >-
+            {{ planned_outage_polygons_response.content
+               if planned_outage_polygons_response.content is defined else [] }}
+
+      - name: "Aiken Co-op Service Area"
+        unique_id: aiken_coop_service_area
+        state: >-
+          {{ service_area_response.content.features | count
+             if service_area_response.content is defined else 0 }}
+        icon: mdi:map-outline
+        attributes:
+          geojson: >-
+            {{ service_area_response.content
+               if service_area_response.content is defined
+               else {"type": "FeatureCollection", "features": []} }}
+
+recorder:
+history:
+
+shell_command:
+  generate_ai_briefing: "python3 /config/scripts/ai_briefing.py"
+
+automation:
+  - id: nws_wagener_power_weather_notification
+    alias: "RV power weather alert changed"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.nws_wagener_power_weather_alerts
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ trigger.to_state is not none and trigger.to_state.state not in ['clear', 'unknown', 'unavailable'] }}
+    actions:
+      # Replace with your actual companion-app service, e.g. notify.mobile_app_michaels_iphone.
+      - action: notify.mobile_app_your_phone
+        data:
+          title: "RV power weather alert"
+          message: >-
+            {% set alerts = trigger.to_state.attributes.features | default([], true) %}
+            {% set first = alerts[0].properties if alerts | count else {} %}
+            {{ first.event | default('Weather alert') }}{% if first.severity is defined %} · {{ first.severity }}{% endif %}{% if first.expires is defined %} · expires {{ as_timestamp(first.expires) | timestamp_custom('%a %-I:%M %p') }}{% endif %}
+          data:
+            tag: rv-power-weather
+            group: rv-power-weather
+
