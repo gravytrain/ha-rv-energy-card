@@ -14,7 +14,7 @@ import type {
   WeatherAlert,
 } from './types.js';
 
-const CARD_VERSION = '0.11.0';
+const CARD_VERSION = '0.11.1';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -312,7 +312,7 @@ export class RvEnergyCard extends LitElement {
     const active = alerts.length > 0;
     const primary = alerts[0]?.properties;
     const state = unavailable ? 'NWS STATUS UNKNOWN' : active ? `${alerts.length} ACTIVE ALERT${alerts.length === 1 ? '' : 'S'}` : 'NO ACTIVE ALERTS';
-    const detail = primary?.headline || primary?.description || 'No NWS weather alerts are active for the RV area.';
+    const detail = primary?.headline || primary?.description || 'No NWS weather alerts are active for the area.';
     return html`
       <div class="weather-status ${active || unavailable ? 'alert' : ''}" aria-label="National Weather Service power weather status">
         <div class="weather-status-head">
