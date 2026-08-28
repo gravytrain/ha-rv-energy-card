@@ -1,0 +1,137 @@
+upsert_bill:
+  name: Save utility bill draft
+  description: Save the utility company's bill metadata and amounts as a draft.
+  fields:
+    bill_id:
+      required: true
+      example: "2026-07-12_2026-08-12"
+      selector:
+        text:
+    period_start:
+      required: true
+      selector:
+        date:
+    period_end:
+      required: true
+      selector:
+        date:
+    billed_kwh:
+      required: true
+      selector:
+        number:
+          min: 0
+          step: 0.1
+          mode: box
+    energy_charge:
+      selector:
+        number:
+          min: 0
+          step: 0.01
+          mode: box
+    local_tax:
+      selector:
+        number:
+          min: 0
+          step: 0.01
+          mode: box
+    state_tax:
+      selector:
+        number:
+          min: 0
+          step: 0.01
+          mode: box
+    utility_invoice_url:
+      selector:
+        text:
+    utility_invoice_sha256:
+      selector:
+        text:
+
+reconcile:
+  name: Reconcile utility bill
+  description: Freeze the monitored usage and rate snapshot used to compare with a bill.
+  fields:
+    bill_id:
+      required: true
+      selector:
+        text:
+    north_kwh:
+      required: true
+      selector:
+        number:
+          min: 0
+          step: 0.001
+          mode: box
+    south_kwh:
+      required: true
+      selector:
+        number:
+          min: 0
+          step: 0.001
+          mode: box
+    shed_kwh:
+      required: true
+      selector:
+        number:
+          min: 0
+          step: 0.001
+          mode: box
+    base_rate:
+      selector:
+        number:
+          min: 0
+          step: any
+          mode: box
+    pca_rate:
+      selector:
+        number:
+          step: any
+          mode: box
+    note:
+      selector:
+        text:
+          multiline: true
+
+approve:
+  name: Approve reconciliation
+  description: Approve the frozen bill and reconciliation snapshot for invoicing.
+  fields:
+    bill_id:
+      required: true
+      selector:
+        text:
+    note:
+      selector:
+        text:
+          multiline: true
+
+mark_invoice_requested:
+  name: Mark invoice requested
+  description: Record that an approved snapshot was sent to the invoice generator.
+  fields:
+    bill_id:
+      required: true
+      selector:
+        text:
+
+record_invoice:
+  name: Record issued invoice
+  description: Attach an immutable generated invoice revision to the bill ledger.
+  fields:
+    bill_id:
+      required: true
+      selector:
+        text:
+    invoice_url:
+      required: true
+      selector:
+        text:
+    invoice_sha256:
+      selector:
+        text:
+    revision:
+      selector:
+        number:
+          min: 1
+          step: 1
+          mode: box

@@ -103,7 +103,31 @@ export interface RvEnergyCardConfig {
   bills_url?: string; // folder link to stored bill PDFs (set in dashboard config)
   invoice_url_base?: string; // base URL for invoice PDFs; "YYYY-MM.pdf" appended (set in dashboard config)
   invoice_script?: string; // script to (re)generate the current invoice
+  billing_ledger_entity?: string; // summary sensor from energy_billing_ledger
   [key: string]: unknown;
+}
+
+export type BillingLedgerStatus =
+  | 'draft'
+  | 'reconciled'
+  | 'approved'
+  | 'invoice_requested'
+  | 'issued';
+
+export interface BillingLedgerBill {
+  bill_id: string;
+  status: BillingLedgerStatus;
+  period_start: string;
+  period_end: string;
+  billed_kwh: number;
+  bill_total: number;
+  utility_invoice_url?: string;
+  reconciliation?: {
+    monitored_kwh: number;
+    variance_kwh: number;
+    variance_pct?: number;
+  };
+  invoice_revisions?: Array<{ revision: number; url: string; sha256?: string }>;
 }
 
 /** One statistics row from recorder/statistics_during_period. */

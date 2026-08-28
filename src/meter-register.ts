@@ -61,19 +61,19 @@ export class MeterRegister extends LitElement {
         width: clamp(28px, 8.5vw, 40px);
         height: clamp(44px, 13vw, 62px);
         overflow: hidden;
-        border: 1px solid #000;
+        border: 1px solid var(--meter-black);
         border-radius: 4px;
         background: linear-gradient(
           180deg,
-          #0a0b0e 0%,
-          #202329 48%,
-          #202329 52%,
-          #0a0b0e 100%
+          var(--meter-dark) 0%,
+          var(--meter-mid) 48%,
+          var(--meter-mid) 52%,
+          var(--meter-dark) 100%
         );
-        box-shadow: 0 1px 0 #3a414c inset;
+        box-shadow: 0 1px 0 var(--meter-highlight) inset;
       }
       .digit.dec {
-        background: linear-gradient(180deg, #3a2a0c, #241c08 52%, #120d04);
+        background: linear-gradient(180deg, var(--meter-accent-mid), var(--accent-ink) 52%, var(--meter-accent-dark));
       }
       /* the mechanical seam across the middle of the window */
       .digit::after {
@@ -83,8 +83,8 @@ export class MeterRegister extends LitElement {
         right: 0;
         top: 50%;
         height: 1px;
-        background: rgba(0, 0, 0, 0.6);
-        box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
+        background: color-mix(in srgb, var(--meter-black) 60%, transparent);
+        box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 4%, transparent);
         z-index: 2;
         pointer-events: none;
       }
@@ -103,7 +103,7 @@ export class MeterRegister extends LitElement {
         font-size: clamp(27px, 8vw, 40px);
         line-height: 1;
         color: var(--ink);
-        text-shadow: 0 1px 1px #000;
+        text-shadow: 0 1px 1px var(--meter-black);
       }
       .digit.dec .cell {
         color: var(--brass);

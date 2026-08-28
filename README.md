@@ -9,6 +9,14 @@ as its signature element.
 Built with **Lit** and bundled with **esbuild** (like native/community cards),
 so DOM updates are granular and the register can animate its roll.
 
+## Theming
+
+The card inherits colors from the active Home Assistant theme. The **EEReserve**
+theme supplies its complete intended palette through documented `home-ui-*`
+variables. With another theme, the card falls back to standard Home Assistant
+surface, text, accent, success, and error variables, then to its original colors.
+No card-local theme setting is required.
+
 ## Development
 
 ```bash
@@ -36,6 +44,22 @@ type: custom:rv-energy-card
 billing_start_day: 12
 use_statistics: true
 ```
+
+### Bill ledger
+
+Copy `custom_components/energy_billing_ledger` into Home Assistant's
+`/config/custom_components/` directory and add this top-level key to
+`configuration.yaml`:
+
+```yaml
+energy_billing_ledger:
+```
+
+After restarting Home Assistant, the card's last-period section guides a bill
+through **Save & reconcile → Approve snapshot → Generate invoice**. The ledger is
+stored in Home Assistant's `.storage` directory; approved records are immutable,
+so corrections use a new bill revision. The NAS artifact/API contract is in
+[`docs/billing-contract.md`](docs/billing-contract.md).
 
 ## Features
 
@@ -71,6 +95,7 @@ use_statistics: true
 | `show_weather_alerts` | `true` | Show the NWS power-weather monitor |
 | `base_rate_entity` | `input_number.base_electricity_rate` | Base $/kWh |
 | `pca_rate_entity` | `input_number.current_pca_rate` | PCA $/kWh adder |
+| `billing_ledger_entity` | `sensor.energy_billing_ledger` | Durable bill/reconciliation ledger summary |
 | `north_max_power` / `south_max_power` / `shed_max_power` | `5000` | Gauge full-scale watts per site |
 
 ## Data sources

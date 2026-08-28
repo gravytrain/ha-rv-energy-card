@@ -12,16 +12,24 @@ import type {
   OutageDetail,
   CountyStatus,
   WeatherAlert,
+  BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.11.1';
+const CARD_VERSION = '0.13.0';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
   name: string;
   color: string;
   power: string;
+  /** Durable external statistic populated from retained Refoss interval data. */
   stat: string;
+  /** Pre-migration statistic, retained only for billing periods before Aug 12. */
+  legacyStat: string;
+  /** Live lifetime entity when the Refoss integration exposes it. */
+  liveCumulative: string;
+  /** Recorder-independent cumulative value owned by the backfill. */
+  cumulativeFallback: string;
   fallbackPeriod: string;
   today: string;
 }
@@ -32,7 +40,10 @@ const SITES: Site[] = [
     name: 'North',
     color: 'var(--north)',
     power: 'sensor.north_site_power',
-    stat: 'sensor.refoss_smart_energy_monitor_total_energy_north_site',
+    stat: 'refoss:north_rv_energy',
+    legacyStat: 'sensor.refoss_smart_energy_monitor_total_energy_north_site',
+    liveCumulative: 'sensor.refoss_smart_energy_monitor_total_energy_north_site',
+    cumulativeFallback: 'input_number.refoss_sum_north_rv',
     fallbackPeriod: 'sensor.refoss_smart_energy_monitor_north_site_billing_period',
     today: 'sensor.north_site_today_energy',
   },
@@ -41,7 +52,10 @@ const SITES: Site[] = [
     name: 'South',
     color: 'var(--south)',
     power: 'sensor.south_site_power',
-    stat: 'sensor.refoss_smart_energy_monitor_south_site_total_energy',
+    stat: 'refoss:south_rv_energy',
+    legacyStat: 'sensor.refoss_smart_energy_monitor_south_site_total_energy',
+    liveCumulative: 'sensor.refoss_smart_energy_monitor_south_site_total_energy',
+    cumulativeFallback: 'input_number.refoss_sum_south_rv',
     fallbackPeriod: 'sensor.refoss_smart_energy_monitor_south_site_billing_period',
     today: 'sensor.south_site_today_energy',
   },
@@ -50,7 +64,10 @@ const SITES: Site[] = [
     name: 'She-Shed',
     color: 'var(--shed)',
     power: 'sensor.em_channel_3_power',
-    stat: 'sensor.shed_refoss_smart_energy_monitor_she_shed_total_energy',
+    stat: 'refoss:shed_energy',
+    legacyStat: 'sensor.shed_refoss_smart_energy_monitor_she_shed_total_energy',
+    liveCumulative: 'sensor.shed_refoss_smart_energy_monitor_she_shed_total_energy',
+    cumulativeFallback: 'input_number.refoss_sum_shed',
     fallbackPeriod: 'sensor.refoss_smart_energy_monitor_she_shed_billing_period',
     today: 'sensor.em_channel_3_today_energy',
   },
@@ -74,6 +91,8 @@ export class RvEnergyCard extends LitElement {
   @state() private _lastPeriodMonitored?: number;
   /** Per-site statistics for the previous billing period, used for bill allocation. */
   @state() private _lastPeriodStats: Partial<Record<Site['key'], number>> = {};
+  @state() private _invoiceStatus?: string;
+  @state() private _ledgerBusy = false;
 
   private _statsTimer?: number;
   private _statsLoaded = false;
@@ -107,6 +126,7 @@ export class RvEnergyCard extends LitElement {
       last_bill_local_tax_entity: 'input_number.last_coop_bill_local_tax',
       last_bill_sc_tax_entity: 'input_number.last_coop_bill_sc_tax',
       invoice_script: 'script.generate_monthly_invoice',
+      billing_ledger_entity: 'sensor.energy_billing_ledger',
       // Installation-specific URLs (portal, stored bills, invoice PDF base) are
       // intentionally NOT defaulted here — set them in your dashboard card config.
       // They point at private infrastructure and must not be baked into the repo.
@@ -170,8 +190,7 @@ export class RvEnergyCard extends LitElement {
       for (const site of SITES) {
         const rows = result?.[site.stat];
         if (Array.isArray(rows) && rows.length) {
-          let sum = rows.reduce((a, r) => a + (r.change || 0), 0);
-          if (site.key === 'shed' && sum > 1000) sum = sum / 1000; // Wh → kWh
+          const sum = rows.reduce((a, r) => a + (r.change || 0), 0);
           stats[site.key] = sum;
           // Capture the live cumulative reading NOW so we can add real-time creep
           // on top of this authoritative baseline until the next stats refresh.
@@ -190,24 +209,41 @@ export class RvEnergyCard extends LitElement {
       try {
         const prevEnd = start;
         const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+        const previousIds = SITES.flatMap((site) => [site.stat, site.legacyStat]);
         const prev = await this.hass.callWS<Record<string, StatisticRow[]>>({
           type: 'recorder/statistics_during_period',
           start_time: prevStart.toISOString(),
           end_time: prevEnd.toISOString(),
-          statistic_ids: ids,
+          statistic_ids: previousIds,
           period: 'day',
           types: ['change'],
         });
         let total = 0;
         const bySite: Partial<Record<Site['key'], number>> = {};
         for (const site of SITES) {
-          const rows = prev?.[site.stat];
-          if (Array.isArray(rows) && rows.length) {
-            let sum = rows.reduce((a, r) => a + (r.change || 0), 0);
-            if (site.key === 'shed' && sum > 1000) sum = sum / 1000;
-            total += sum;
-            bySite[site.key] = sum;
+          // Prefer the durable external statistic. During the migration period,
+          // select the source with more daily buckets so July can still use the
+          // legacy history without ever adding the two cumulative series.
+          const candidates = [
+            { rows: prev?.[site.stat], scale: 1 },
+            { rows: prev?.[site.legacyStat], scale: site.key === 'shed' ? 0.001 : 1 },
+          ];
+          const exclusiveEnd = prevEnd.getTime();
+          let selected: StatisticRow[] = [];
+          let scale = 1;
+          for (const candidate of candidates) {
+            const rows = Array.isArray(candidate.rows)
+              ? candidate.rows.filter((row) => row.start < exclusiveEnd)
+              : [];
+            if (rows.length > selected.length) {
+              selected = rows;
+              scale = candidate.scale;
+            }
           }
+          if (!selected.length) continue;
+          const sum = selected.reduce((a, r) => a + (r.change || 0), 0) * scale;
+          total += sum;
+          bySite[site.key] = sum;
         }
         this._lastPeriodMonitored = total;
         this._lastPeriodStats = bySite;
@@ -218,11 +254,25 @@ export class RvEnergyCard extends LitElement {
     }
   }
 
-  /** Live cumulative total-energy reading for a site (kWh), from its stat entity. */
+  /** Live cumulative total-energy reading for a site, normalized to kWh. */
   private _liveCumulative(site: Site): number {
-    let v = this._num(site.stat);
-    if (site.key === 'shed' && v > 1000) v = v / 1000; // Wh → kWh
-    return v;
+    // The backfill-owned helper is restart-proof and is the canonical
+    // cumulative anchor. Only consult the legacy integration entity when the
+    // helper has not been created yet (older installs/migration fallback).
+    const durable = this.hass?.states[site.cumulativeFallback];
+    if (durable) {
+      const value = parseFloat(durable.state);
+      if (!isNaN(value)) return value;
+    }
+    const live = this.hass?.states[site.liveCumulative];
+    if (live) {
+      let value = parseFloat(live.state);
+      if (!isNaN(value)) {
+        if (site.key === 'shed') value = value / 1000; // legacy shed sensor is Wh
+        return value;
+      }
+    }
+    return this._num(site.cumulativeFallback);
   }
 
   /**
@@ -614,6 +664,8 @@ export class RvEnergyCard extends LitElement {
     };
     const inLaws = allocation(northAndShed);
     const ours = allocation(south);
+    const ledgerBill = this._ledgerBill();
+    const canReconcile = !ledgerBill || ledgerBill.status === 'draft' || ledgerBill.status === 'reconciled';
 
     return html`
       <div class="sec-head">
@@ -682,6 +734,19 @@ export class RvEnergyCard extends LitElement {
                     </div>
                   </div>`
                 : nothing}
+              <div class="ledger-actions">
+                <span class="ledger-state ${ledgerBill?.status ?? 'empty'}">
+                  LEDGER · ${(ledgerBill?.status ?? 'not saved').replace(/_/g, ' ').toUpperCase()}
+                </span>
+                <button class="btn" @click=${this._saveAndReconcileBill} ?disabled=${this._ledgerBusy || !canReconcile}>
+                  ${ledgerBill ? '↻ Reconcile again' : '＋ Save & reconcile'}
+                </button>
+                <button
+                  class="btn primary"
+                  @click=${this._approveBill}
+                  ?disabled=${this._ledgerBusy || ledgerBill?.status !== 'reconciled'}
+                >✓ Approve snapshot</button>
+              </div>
             `
           : html`<div class="var-note">
               Set <code>${this._config.last_bill_kwh_entity}</code> to the co-op's billed kWh to
@@ -697,6 +762,9 @@ export class RvEnergyCard extends LitElement {
    */
   private _renderInvoices() {
     const base = this._config.invoice_url_base;
+    const usage = this._invoiceUsage();
+    const ledgerBill = this._ledgerBill();
+    const canGenerate = ledgerBill?.status === 'approved';
     // Invoices exist only for COMPLETED billing periods. The current window's
     // start is the in-progress (unbilled) period, so completed periods begin at
     // start−1 month, start−2, etc. The invoice file is keyed by each period's
@@ -724,7 +792,16 @@ export class RvEnergyCard extends LitElement {
       <div class="meter">
         <div class="actions">
           ${this._config.invoice_script
-            ? html`<button class="btn primary" @click=${this._generateInvoice}>
+            ? html`<button
+                class="btn primary"
+                @click=${this._generateInvoice}
+                ?disabled=${!usage || !canGenerate || this._ledgerBusy}
+                title=${usage
+                  ? canGenerate
+                    ? `Generate from approved snapshot and ${usage.total.toFixed(1)} kWh of authoritative monitored usage`
+                    : 'Save, reconcile, and approve the bill snapshot first'
+                  : 'Waiting for complete last-period statistics and billed kWh'}
+              >
                 ⎙ Generate invoice
               </button>`
             : nothing}
@@ -737,7 +814,13 @@ export class RvEnergyCard extends LitElement {
                 >↗ View co-op bills</a
               >`
             : nothing}
+          ${usage
+            ? html`<span class="invoice-preview">
+                ${usage.total.toFixed(1)} kWh · North ${usage.north.toFixed(1)} + She-Shed ${usage.shed.toFixed(1)}
+              </span>`
+            : nothing}
         </div>
+        ${this._invoiceStatus ? html`<div class="invoice-status">${this._invoiceStatus}</div>` : nothing}
         <div class="invoice-list">
           ${months.map(
             (m) => html`
@@ -758,16 +841,152 @@ export class RvEnergyCard extends LitElement {
     `;
   }
 
-  private _generateInvoice = () => {
+  private _previousPeriod(): { start: Date; end: Date; billId: string } {
+    const { start } = this._billingWindow();
+    const previous = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+    const date = (value: Date) => {
+      const y = value.getFullYear();
+      const m = String(value.getMonth() + 1).padStart(2, '0');
+      const d = String(value.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+    return { start: previous, end: start, billId: `${date(previous)}_${date(start)}` };
+  }
+
+  private _ledgerBill(): BillingLedgerBill | undefined {
+    const entityId = this._config.billing_ledger_entity;
+    const latest = entityId ? this.hass?.states[entityId]?.attributes.latest_bill : undefined;
+    if (!latest || typeof latest !== 'object') return undefined;
+    const bill = latest as unknown as BillingLedgerBill;
+    return bill.bill_id === this._previousPeriod().billId ? bill : undefined;
+  }
+
+  private _callLedger(service: string, serviceData: Record<string, unknown>) {
+    if (!this.hass) throw new Error('Home Assistant is unavailable');
+    return this.hass.callWS({
+      type: 'call_service',
+      domain: 'energy_billing_ledger',
+      service,
+      service_data: serviceData,
+    });
+  }
+
+  private _saveAndReconcileBill = async () => {
+    if (!this.hass || this._ledgerBusy) return;
+    const north = this._lastPeriodStats.north;
+    const south = this._lastPeriodStats.south;
+    const shed = this._lastPeriodStats.shed;
+    const billedKwh = this._num(this._config.last_bill_kwh_entity);
+    if (north == null || south == null || shed == null || billedKwh <= 0) {
+      this._invoiceStatus = 'Cannot reconcile: complete statistics and billed kWh are required.';
+      return;
+    }
+    const period = this._previousPeriod();
+    const date = (value: Date) => {
+      const y = value.getFullYear();
+      const m = String(value.getMonth() + 1).padStart(2, '0');
+      const d = String(value.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+    this._ledgerBusy = true;
+    this._invoiceStatus = 'Saving utility bill and reconciliation snapshot…';
+    try {
+      await this._callLedger('upsert_bill', {
+        bill_id: period.billId,
+        period_start: date(period.start),
+        period_end: date(period.end),
+        billed_kwh: billedKwh,
+        energy_charge: this._num(this._config.last_bill_energy_entity),
+        local_tax: this._num(this._config.last_bill_local_tax_entity),
+        state_tax: this._num(this._config.last_bill_sc_tax_entity),
+      });
+      await this._callLedger('reconcile', {
+        bill_id: period.billId,
+        north_kwh: Math.round(north * 1e6) / 1e6,
+        south_kwh: Math.round(south * 1e6) / 1e6,
+        shed_kwh: Math.round(shed * 1e6) / 1e6,
+        base_rate: this._num(this._config.base_rate_entity),
+        pca_rate: this._num(this._config.pca_rate_entity),
+      });
+      this._invoiceStatus = `Reconciled ${billedKwh.toFixed(1)} billed kWh against ${(north + south + shed).toFixed(1)} monitored kWh.`;
+    } catch (error) {
+      this._invoiceStatus = `Ledger update failed: ${error instanceof Error ? error.message : 'check Home Assistant logs'}`;
+    } finally {
+      this._ledgerBusy = false;
+    }
+  };
+
+  private _approveBill = async () => {
+    const bill = this._ledgerBill();
+    if (!bill || this._ledgerBusy) return;
+    this._ledgerBusy = true;
+    try {
+      await this._callLedger('approve', { bill_id: bill.bill_id });
+      this._invoiceStatus = 'Reconciliation snapshot approved. Invoice generation is unlocked.';
+    } catch (error) {
+      this._invoiceStatus = `Approval failed: ${error instanceof Error ? error.message : 'check Home Assistant logs'}`;
+    } finally {
+      this._ledgerBusy = false;
+    }
+  };
+
+  private _invoiceUsage(): { north: number; shed: number; total: number } | undefined {
+    const north = this._lastPeriodStats.north;
+    const south = this._lastPeriodStats.south;
+    const shed = this._lastPeriodStats.shed;
+    const billedKwh = this._num(this._config.last_bill_kwh_entity);
+    if (north == null || south == null || shed == null || billedKwh <= 0) return undefined;
+    const total = north + shed;
+    return total > 0 ? { north, shed, total } : undefined;
+  }
+
+  private _generateInvoice = async () => {
     const script = this._config.invoice_script;
     if (!this.hass || !script) return;
+    const usage = this._invoiceUsage();
+    if (!usage) {
+      this._invoiceStatus = 'Invoice not generated: last-period statistics or billed kWh are unavailable.';
+      return;
+    }
+    const ledgerBill = this._ledgerBill();
+    if (ledgerBill?.status !== 'approved') {
+      this._invoiceStatus = 'Invoice not generated: approve the reconciliation snapshot first.';
+      return;
+    }
     const [domain, service] = script.split('.');
-    this.hass.callWS({
-      type: 'call_service',
-      domain,
-      service,
-      service_data: {},
-    });
+    const { start } = this._billingWindow();
+    const periodStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+    const date = (value: Date) => value.toISOString().slice(0, 10);
+    const roundKwh = (value: number) => Math.round(value * 1000) / 1000;
+    this._invoiceStatus = `Generating invoice for ${usage.total.toFixed(1)} kWh…`;
+    try {
+      await this.hass.callWS({
+        type: 'call_service',
+        domain,
+        service,
+        service_data: {
+          period_start: date(periodStart),
+          period_end: date(start),
+          north_kwh_override: roundKwh(usage.north),
+          shed_kwh_override: roundKwh(usage.shed),
+        },
+      });
+      await this._callLedger('mark_invoice_requested', { bill_id: ledgerBill.bill_id });
+      const base = this._config.invoice_url_base;
+      if (base) {
+        const ym = `${periodStart.getFullYear()}-${String(periodStart.getMonth() + 1).padStart(2, '0')}`;
+        await this._callLedger('record_invoice', {
+          bill_id: ledgerBill.bill_id,
+          invoice_url: `${base}${ym}.pdf`,
+          revision: 1,
+        });
+        this._invoiceStatus = `Invoice issued with ${usage.total.toFixed(1)} kWh of monitored usage.`;
+      } else {
+        this._invoiceStatus = `Invoice requested with ${usage.total.toFixed(1)} kWh of monitored usage.`;
+      }
+    } catch {
+      this._invoiceStatus = 'Invoice request failed. Check the Home Assistant script trace.';
+    }
   };
 
   private _updateBilledKwh = (e: Event) => {
@@ -894,10 +1113,10 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-body);
       }
       .meter {
-        background: linear-gradient(180deg, var(--panel) 0%, #191c22 100%);
+        background: linear-gradient(180deg, var(--panel) 0%, color-mix(in srgb, var(--panel) 72%, var(--housing)) 100%);
         border: 1px solid var(--bezel);
         border-radius: 10px;
-        box-shadow: 0 1px 0 #3a414c inset, 0 18px 40px -22px #000;
+        box-shadow: 0 1px 0 var(--meter-highlight) inset, 0 18px 40px -22px var(--meter-black);
         padding: 22px 24px;
         margin-bottom: 18px;
       }
@@ -920,13 +1139,13 @@ export class RvEnergyCard extends LitElement {
         letter-spacing: 0.06em; color: var(--brass); border: 1px solid var(--brass-dim);
         border-radius: 5px; padding: 6px 10px; text-decoration: none; white-space: nowrap;
       }
-      .portal:hover { background: rgba(217, 164, 65, 0.1); }
+      .portal:hover { background: color-mix(in srgb, var(--brass) 10%, transparent); }
       .brand { display: flex; align-items: center; gap: 14px; }
       .glyph {
         width: 40px; height: 40px; border-radius: 7px;
-        background: radial-gradient(circle at 35% 30%, var(--brass) 0%, var(--brass-dim) 70%, #6f5620 100%);
-        display: grid; place-items: center; color: #241c08; font-size: 22px;
-        box-shadow: 0 0 0 1px #000 inset, 0 2px 6px -1px #000;
+        background: radial-gradient(circle at 35% 30%, var(--brass) 0%, var(--brass-dim) 70%, color-mix(in srgb, var(--brass-dim) 65%, var(--meter-accent-dark)) 100%);
+        display: grid; place-items: center; color: var(--accent-ink); font-size: 22px;
+        box-shadow: 0 0 0 1px var(--meter-black) inset, 0 2px 6px -1px var(--meter-black);
       }
       h1 {
         margin: 0; font-family: var(--font-display); font-weight: 600;
@@ -940,22 +1159,22 @@ export class RvEnergyCard extends LitElement {
         display: inline-flex; align-items: center; gap: 7px;
         font-family: var(--font-mono); font-size: 11px; font-weight: 700;
         letter-spacing: 0.08em; padding: 5px 10px; border-radius: 4px;
-        color: var(--ledger); border: 1px solid #3d5236; background: rgba(120, 160, 110, 0.08);
+        color: var(--ledger); border: 1px solid color-mix(in srgb, var(--ledger) 42%, var(--bezel)); background: color-mix(in srgb, var(--ledger) 8%, transparent);
         cursor: pointer;
       }
       button.status { appearance: none; }
       .status:hover, .status:focus-visible { border-color: var(--brass-dim); outline: none; }
       .status.alert {
-        color: var(--needle); border-color: #5a2f2a; background: rgba(200, 72, 58, 0.09);
+        color: var(--needle); border-color: color-mix(in srgb, var(--needle) 42%, var(--bezel)); background: color-mix(in srgb, var(--needle) 9%, transparent);
       }
       .live-dot {
         width: 7px; height: 7px; border-radius: 50%; background: currentColor;
         box-shadow: 0 0 0 0 currentColor; animation: live-pulse 2s infinite;
       }
       @keyframes live-pulse {
-        0% { box-shadow: 0 0 0 0 rgba(159, 191, 143, 0.5); }
-        70% { box-shadow: 0 0 0 6px rgba(159, 191, 143, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(159, 191, 143, 0); }
+        0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ledger) 50%, transparent); }
+        70% { box-shadow: 0 0 0 6px transparent; }
+        100% { box-shadow: 0 0 0 0 transparent; }
       }
       @media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
       .hero {
@@ -976,8 +1195,8 @@ export class RvEnergyCard extends LitElement {
       /* integrated live-flow well */
       .flow-well {
         flex: 1.1; min-width: 360px; position: relative;
-        background: var(--well, #171a20); border-radius: 8px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.35) inset, 0 0 0 1px #000 inset;
+        background: var(--well); border-radius: 8px;
+        box-shadow: 0 2px 5px color-mix(in srgb, var(--meter-black) 35%, transparent) inset, 0 0 0 1px var(--meter-black) inset;
         padding: 16px 18px;
       }
       .flow-cap {
@@ -1007,16 +1226,16 @@ export class RvEnergyCard extends LitElement {
         display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
         margin-top: 16px; padding: 14px 16px;
         background: var(--well); border: 1px solid var(--hairline); border-radius: 8px;
-        box-shadow: 0 2px 5px rgba(0,0,0,.25) inset;
+        box-shadow: 0 2px 5px color-mix(in srgb, var(--meter-black) 25%, transparent) inset;
       }
-      .grid-status.alert { border-color: #5a2f2a; }
+      .grid-status.alert { border-color: color-mix(in srgb, var(--needle) 42%, var(--bezel)); }
       .weather-status {
         display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
         margin-top: 12px; padding: 14px 16px;
         background: var(--well); border: 1px solid var(--hairline); border-radius: 8px;
-        box-shadow: 0 2px 5px rgba(0,0,0,.25) inset;
+        box-shadow: 0 2px 5px color-mix(in srgb, var(--meter-black) 25%, transparent) inset;
       }
-      .weather-status.alert { border-color: #5a2f2a; }
+      .weather-status.alert { border-color: color-mix(in srgb, var(--needle) 42%, var(--bezel)); }
       .weather-status-head { min-width: 190px; }
       .weather-readings { display: flex; flex: 1; gap: 8px; flex-wrap: wrap; min-width: 180px; }
       .weather-alert { min-width: 145px; padding: 4px 12px; border-left: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 4px; }
@@ -1047,16 +1266,16 @@ export class RvEnergyCard extends LitElement {
       .grid-reading small { color: var(--ink-dim); font-size: 10px; font-weight: 400; }
       .grid-map {
         position: relative; flex: 0 0 230px; height: 132px; overflow: hidden;
-        border: 1px solid var(--hairline); border-radius: 5px; background: #111;
+        border: 1px solid var(--hairline); border-radius: 5px; background: var(--meter-dark);
       }
       .grid-map iframe { width: 100%; height: 100%; border: 0; display: block; }
       .grid-map a {
         position: absolute; right: 6px; bottom: 6px; padding: 4px 6px; border-radius: 3px;
-        background: rgba(20,22,27,.86); color: var(--ink); text-decoration: none;
+        background: color-mix(in srgb, var(--housing) 86%, transparent); color: var(--ink); text-decoration: none;
         font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em;
       }
       .grid-incidents { flex-basis: 100%; border-top: 1px solid var(--hairline); padding-top: 11px; }
-      .impact-summary{box-sizing:border-box;width:100%;max-width:100%;overflow:hidden;flex:1 0 100%;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-rows:auto auto;column-gap:10px;align-items:center;flex-direction:column;gap:5px;padding:12px;border:1px solid var(--hairline);border-radius:5px;background:#11151b;font-family:var(--font-mono)}.impact-summary span{grid-column:1;grid-row:1;font-size:9px;letter-spacing:.14em;color:var(--ink-faint)}.impact-summary b{grid-column:2;grid-row:1;font-size:11px;color:var(--ink)}.impact-summary small{grid-column:2;grid-row:2;font-size:10px;color:var(--ink-dim)}.impact-summary button{grid-column:3;grid-row:1 / span 2;align-self:center;padding:0;border:0;background:none;color:var(--brass);font:10px var(--font-mono);cursor:pointer}.grid-map.native-map{padding:0;background:#11151b}.grid-map.native-map button{position:absolute;right:6px;bottom:6px;z-index:1;border:1px solid var(--hairline);border-radius:3px;padding:4px 6px;color:var(--ink);background:rgba(20,22,27,.88);font:9px var(--font-mono);cursor:pointer}.territory-map{width:100%;height:100%;display:block;background:#11151b}.county{fill:#202730;stroke:#4a5562;stroke-width:1.2}.county.affected{fill:#572e2a;stroke:var(--needle)}.county-name,.outage-label,.map-clear{fill:var(--ink-dim);font-family:var(--font-mono);font-size:12px}.outage-label{fill:var(--ink);font-size:11px}.outage-marker{cursor:pointer}.outage-halo{fill:rgba(200,72,58,.32)}.outage-core{fill:var(--needle);stroke:#fff0df;stroke-width:1.5}.outage-marker.selected .outage-core{fill:var(--brass)}.map-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:22px;background:rgba(4,5,7,.76)}.map-dialog{width:min(1100px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--bezel);border-radius:10px;background:var(--panel);box-shadow:0 30px 70px #000}.map-head{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--hairline)}.map-title{margin-top:4px;font-family:var(--font-display);font-size:23px;color:var(--ink)}.map-head a,.map-head button{color:var(--brass);background:none;border:0;text-decoration:none;font-family:var(--font-mono);cursor:pointer}.map-head button{margin-left:15px;font-size:26px;line-height:1}.map-summary{display:flex;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hairline)}.map-summary span{padding:2px 16px;border-left:1px solid var(--hairline);color:var(--ink-dim);font:10px var(--font-mono)}.map-summary span:first-child{border-left:0;padding-left:0}.map-summary b{color:var(--needle);font-size:14px}.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:480px}.map-canvas{min-height:420px;padding:18px}.map-aside{padding:18px;border-left:1px solid var(--hairline);background:var(--well)}.aside-cap{margin:0 0 9px;color:var(--ink-faint);font:9px var(--font-mono);letter-spacing:.14em;text-transform:uppercase}.map-incident{width:100%;margin-bottom:7px;padding:9px;text-align:left;border:1px solid var(--hairline);border-radius:4px;background:transparent;color:var(--ink);cursor:pointer}.map-incident.selected{border-color:var(--needle);background:rgba(200,72,58,.08)}.map-incident b,.map-incident span{display:block}.map-incident b{font:11px var(--font-mono)}.map-incident span,.selected-detail span{color:var(--ink-dim);font:10px var(--font-mono)}.selected-detail{display:grid;gap:3px;padding:10px 0 16px}.selected-detail b{font:12px var(--font-mono);color:var(--ink)}.map-counties{display:grid;gap:4px}.map-counties span,.map-county{display:flex;justify-content:space-between;color:var(--ink-dim);font:10px var(--font-mono)}.map-counties span.affected b,.map-county.affected b{color:var(--needle)}.map-county{width:100%;padding:4px 0;border:0;border-radius:3px;background:transparent;text-align:left;cursor:pointer}.map-county:hover,.map-county:focus{background:rgba(217,164,65,.14);color:var(--ink);outline:1px solid var(--brass-dim)}
+      .impact-summary{box-sizing:border-box;width:100%;max-width:100%;overflow:hidden;flex:1 0 100%;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-rows:auto auto;column-gap:10px;align-items:center;flex-direction:column;gap:5px;padding:12px;border:1px solid var(--hairline);border-radius:5px;background:var(--meter-dark);font-family:var(--font-mono)}.impact-summary span{grid-column:1;grid-row:1;font-size:9px;letter-spacing:.14em;color:var(--ink-faint)}.impact-summary b{grid-column:2;grid-row:1;font-size:11px;color:var(--ink)}.impact-summary small{grid-column:2;grid-row:2;font-size:10px;color:var(--ink-dim)}.impact-summary button{grid-column:3;grid-row:1 / span 2;align-self:center;padding:0;border:0;background:none;color:var(--brass);font:10px var(--font-mono);cursor:pointer}.grid-map.native-map{padding:0;background:var(--meter-dark)}.grid-map.native-map button{position:absolute;right:6px;bottom:6px;z-index:1;border:1px solid var(--hairline);border-radius:3px;padding:4px 6px;color:var(--ink);background:color-mix(in srgb, var(--housing) 88%, transparent);font:9px var(--font-mono);cursor:pointer}.territory-map{width:100%;height:100%;display:block;background:var(--meter-dark)}.county{fill:var(--panel-2);stroke:var(--bezel);stroke-width:1.2}.county.affected{fill:color-mix(in srgb, var(--needle) 38%, var(--panel));stroke:var(--needle)}.county-name,.outage-label,.map-clear{fill:var(--ink-dim);font-family:var(--font-mono);font-size:12px}.outage-label{fill:var(--ink);font-size:11px}.outage-marker{cursor:pointer}.outage-halo{fill:color-mix(in srgb, var(--needle) 32%, transparent)}.outage-core{fill:var(--needle);stroke:var(--ink);stroke-width:1.5}.outage-marker.selected .outage-core{fill:var(--brass)}.map-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:22px;background:color-mix(in srgb, var(--meter-black) 76%, transparent)}.map-dialog{width:min(1100px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--bezel);border-radius:10px;background:var(--panel);box-shadow:0 30px 70px var(--meter-black)}.map-head{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--hairline)}.map-title{margin-top:4px;font-family:var(--font-display);font-size:23px;color:var(--ink)}.map-head a,.map-head button{color:var(--brass);background:none;border:0;text-decoration:none;font-family:var(--font-mono);cursor:pointer}.map-head button{margin-left:15px;font-size:26px;line-height:1}.map-summary{display:flex;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hairline)}.map-summary span{padding:2px 16px;border-left:1px solid var(--hairline);color:var(--ink-dim);font:10px var(--font-mono)}.map-summary span:first-child{border-left:0;padding-left:0}.map-summary b{color:var(--needle);font-size:14px}.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:480px}.map-canvas{min-height:420px;padding:18px}.map-aside{padding:18px;border-left:1px solid var(--hairline);background:var(--well)}.aside-cap{margin:0 0 9px;color:var(--ink-faint);font:9px var(--font-mono);letter-spacing:.14em;text-transform:uppercase}.map-incident{width:100%;margin-bottom:7px;padding:9px;text-align:left;border:1px solid var(--hairline);border-radius:4px;background:transparent;color:var(--ink);cursor:pointer}.map-incident.selected{border-color:var(--needle);background:color-mix(in srgb, var(--needle) 8%, transparent)}.map-incident b,.map-incident span{display:block}.map-incident b{font:11px var(--font-mono)}.map-incident span,.selected-detail span{color:var(--ink-dim);font:10px var(--font-mono)}.selected-detail{display:grid;gap:3px;padding:10px 0 16px}.selected-detail b{font:12px var(--font-mono);color:var(--ink)}.map-counties{display:grid;gap:4px}.map-counties span,.map-county{display:flex;justify-content:space-between;color:var(--ink-dim);font:10px var(--font-mono)}.map-counties span.affected b,.map-county.affected b{color:var(--needle)}.map-county{width:100%;padding:4px 0;border:0;border-radius:3px;background:transparent;text-align:left;cursor:pointer}.map-county:hover,.map-county:focus{background:color-mix(in srgb, var(--brass) 14%, transparent);color:var(--ink);outline:1px solid var(--brass-dim)}
       .incident { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
       .incident b { color: var(--needle); letter-spacing: .05em; }
       .county-alerts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
@@ -1073,7 +1292,7 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
         padding: 3px 8px; border-radius: 4px;
       }
-      .prov.ok { color: var(--ledger); border: 1px solid #3d5236; }
+      .prov.ok { color: var(--ledger); border: 1px solid color-mix(in srgb, var(--ledger) 42%, var(--bezel)); }
       .prov.est { color: var(--brass); border: 1px dashed var(--brass-dim); }
       .statement .amt {
         font-family: var(--font-display); font-weight: 700; font-size: 34px;
@@ -1120,17 +1339,30 @@ export class RvEnergyCard extends LitElement {
         display: inline-flex; align-items: center; gap: 8px;
         font-family: var(--font-mono); font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
         padding: 10px 14px; border-radius: 6px; cursor: pointer; text-decoration: none;
-        border: 1px solid var(--hairline); color: var(--ink); background: rgba(255, 255, 255, 0.02);
+        border: 1px solid var(--hairline); color: var(--ink); background: color-mix(in srgb, var(--ink) 2%, transparent);
       }
       .btn:hover { border-color: var(--brass-dim); }
+      .btn:disabled { cursor: not-allowed; opacity: .48; }
       .btn.primary {
-        color: #241c08; background: linear-gradient(180deg, var(--brass), var(--brass-dim));
+        color: var(--accent-ink); background: linear-gradient(180deg, var(--brass), var(--brass-dim));
         border-color: var(--brass-dim);
       }
       .invoice-list { margin-top: 14px; font-family: var(--font-mono); font-size: 12px; }
+      .invoice-preview, .invoice-status { color: var(--ink-dim); font: 11px var(--font-mono); }
+      .invoice-status { margin-top: 10px; }
+      .ledger-actions {
+        display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+        margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hairline);
+      }
+      .ledger-state {
+        margin-right: auto; color: var(--ink-dim); font: 700 10px var(--font-mono);
+        letter-spacing: .08em;
+      }
+      .ledger-state.approved, .ledger-state.issued { color: var(--ledger); }
+      .ledger-state.reconciled { color: var(--brass); }
       .invoice-row {
         display: flex; justify-content: space-between; align-items: center;
-        padding: 9px 4px; border-bottom: 1px solid rgba(49, 56, 66, 0.5);
+        padding: 9px 4px; border-bottom: 1px solid color-mix(in srgb, var(--hairline) 50%, transparent);
       }
       .invoice-row:last-child { border-bottom: none; }
       .invoice-row .p { color: var(--ink); }
