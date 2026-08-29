@@ -15,7 +15,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.13.0';
+const CARD_VERSION = '0.13.1';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -172,26 +172,54 @@ export class RvEnergyCard extends LitElement {
     return { start, end };
   }
 
+  /**
+   * Calculate usage from cumulative hourly sums without treating a statistic's
+   * initial lifetime offset as energy consumed inside the requested period.
+   */
+  private _usageFromSums(rows: StatisticRow[], start: Date, end: Date): number | undefined {
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+    const usable = rows
+      .filter((row) => Number.isFinite(row.sum) && row.start < endMs)
+      .sort((a, b) => a.start - b.start);
+    const inside = usable.filter((row) => row.start >= startMs);
+    const last = inside[inside.length - 1];
+    if (!last || last.sum == null) return undefined;
+
+    const earlier = usable.filter((row) => row.start < startMs);
+    const before = earlier[earlier.length - 1];
+    if (before?.sum != null) return Math.max(0, last.sum - before.sum);
+
+    // The recovered refoss:* series begins exactly at the Aug 12 boundary but
+    // retains its older lifetime sum. Its first hourly `state` is that hour's
+    // measured kWh, so include that interval rather than the lifetime offset.
+    const first = inside[0];
+    if (first?.sum == null || !Number.isFinite(first.state)) return undefined;
+    return Math.max(0, last.sum - first.sum + (first.state ?? 0));
+  }
+
   private async _loadStatistics() {
     if (!this.hass) return;
     const { start, end } = this._billingWindow();
     const ids = SITES.map((s) => s.stat);
     try {
+      const queryStart = new Date(start.getTime() - 60 * 60 * 1000);
       const result = await this.hass.callWS<Record<string, StatisticRow[]>>({
         type: 'recorder/statistics_during_period',
-        start_time: start.toISOString(),
+        start_time: queryStart.toISOString(),
         end_time: end.toISOString(),
         statistic_ids: ids,
-        period: 'day',
-        types: ['change'],
+        period: 'hour',
+        types: ['sum', 'state'],
       });
       const stats: Partial<Record<Site['key'], number>> = {};
       const anchor: Partial<Record<Site['key'], number>> = {};
       for (const site of SITES) {
         const rows = result?.[site.stat];
         if (Array.isArray(rows) && rows.length) {
-          const sum = rows.reduce((a, r) => a + (r.change || 0), 0);
-          stats[site.key] = sum;
+          const usage = this._usageFromSums(rows, start, end);
+          if (usage == null) continue;
+          stats[site.key] = usage;
           // Capture the live cumulative reading NOW so we can add real-time creep
           // on top of this authoritative baseline until the next stats refresh.
           anchor[site.key] = this._liveCumulative(site);
