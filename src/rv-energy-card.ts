@@ -15,7 +15,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.13.1';
+const CARD_VERSION = '0.13.2';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -1370,7 +1370,9 @@ export class RvEnergyCard extends LitElement {
         border: 1px solid var(--hairline); color: var(--ink); background: color-mix(in srgb, var(--ink) 2%, transparent);
       }
       .btn:hover { border-color: var(--brass-dim); }
-      .btn:disabled { cursor: not-allowed; opacity: .48; }
+      /* Some Linux cursor themes omit the not-allowed glyph entirely. Keep a
+         visible arrow while opacity and the native disabled state convey it. */
+      .btn:disabled { cursor: default; opacity: .48; }
       .btn.primary {
         color: var(--accent-ink); background: linear-gradient(180deg, var(--brass), var(--brass-dim));
         border-color: var(--brass-dim);
