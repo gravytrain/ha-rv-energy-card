@@ -92,6 +92,7 @@ so corrections use a new bill revision. The NAS artifact/API contract is in
 | `grid_map_url` | `https://map.aikenco-op.org/` | Live outage map; only embedded for a grid issue |
 | `grid_map_link` | `https://map.aikenco-op.org/` | Optional URL opened from the map preview |
 | `weather_alert_entity` | `sensor.nws_wagener_power_weather_alerts` | NWS active-alert sensor for the RV location |
+| `weather_url` | NWS Wagener point forecast | Human-readable NWS forecast and alerts page opened by the WX badge |
 | `show_weather_alerts` | `true` | Show the NWS power-weather monitor |
 | `base_rate_entity` | `input_number.base_electricity_rate` | Base $/kWh |
 | `pca_rate_entity` | `input_number.current_pca_rate` | PCA $/kWh adder |
@@ -150,4 +151,6 @@ The included [aiken-coop-outage-monitoring.yaml](aiken-coop-outage-monitoring.ya
 minutes for the Wagener/RV coordinates, retains the event, severity, expiry, headline, and safety
 instructions, and sends one notification whenever the set of active alerts changes. Before enabling
 the package, replace `notify.mobile_app_your_phone` with your actual mobile-app notification service.
-The card needs no extra configuration unless you use a different entity id or location.
+The top `WX CLEAR` / `WX ALERT` badge always opens the human-readable NWS forecast and alerts page.
+The card needs no extra configuration unless you use a different entity id or location; set
+`weather_url` to the corresponding NWS point-forecast URL when changing locations.

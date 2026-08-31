@@ -88,6 +88,8 @@ export interface RvEnergyCardConfig {
   /** Optional destination for the outage map. */
   grid_map_link?: string;
   weather_alert_entity?: string;
+  /** Human-readable NWS forecast and alerts page opened by the WX badge. */
+  weather_url?: string;
   show_weather_alerts?: boolean;
   base_rate_entity?: string;
   pca_rate_entity?: string;

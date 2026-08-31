@@ -73,6 +73,8 @@ const SITES: Site[] = [
   },
 ];
 
+const DEFAULT_NWS_URL =
+  'https://forecast.weather.gov/MapClick.php?lat=33.6500&lon=-81.3600';
 
 @customElement('rv-energy-card')
 export class RvEnergyCard extends LitElement {
@@ -115,6 +117,7 @@ export class RvEnergyCard extends LitElement {
       grid_map_url: 'https://map.aikenco-op.org/',
       grid_map_link: 'https://map.aikenco-op.org/',
       weather_alert_entity: 'sensor.nws_wagener_power_weather_alerts',
+      weather_url: DEFAULT_NWS_URL,
       show_weather_alerts: true,
       base_rate_entity: 'input_number.base_electricity_rate',
       pca_rate_entity: 'input_number.current_pca_rate',
@@ -586,7 +589,14 @@ export class RvEnergyCard extends LitElement {
               >
                 <span class="live-dot"></span>${gridLabel}
               </button>
-              ${this._config.show_weather_alerts ? html`<span class="status ${weatherAlert ? 'alert' : ''}" title="National Weather Service alert status"><span class="live-dot"></span>${weatherAlert ? 'WX ALERT' : 'WX CLEAR'}</span>` : nothing}
+              ${this._config.show_weather_alerts ? html`<a
+                class="status ${weatherAlert ? 'alert' : ''}"
+                href="${this._config.weather_url ?? DEFAULT_NWS_URL}"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open National Weather Service forecast and alerts"
+                aria-label="Open National Weather Service forecast and alerts"
+              ><span class="live-dot"></span>${weatherAlert ? 'WX ALERT' : 'WX CLEAR'} &#8599;</a>` : nothing}
             </div>
           </div>
 
@@ -1187,6 +1197,7 @@ export class RvEnergyCard extends LitElement {
         letter-spacing: 0.08em; padding: 5px 10px; border-radius: 4px;
         color: var(--ledger); border: 1px solid color-mix(in srgb, var(--ledger) 42%, var(--bezel)); background: color-mix(in srgb, var(--ledger) 8%, transparent);
         cursor: pointer;
+        text-decoration: none;
       }
       button.status { appearance: none; }
       .status:hover, .status:focus-visible { border-color: var(--brass-dim); outline: none; }
