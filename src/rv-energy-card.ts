@@ -118,7 +118,6 @@ export class RvEnergyCard extends LitElement {
       show_weather_alerts: true,
       base_rate_entity: 'input_number.base_electricity_rate',
       pca_rate_entity: 'input_number.current_pca_rate',
-      meter_multiplier: 40,
       show_last_period: true,
       show_invoices: true,
       last_bill_kwh_entity: 'input_number.last_coop_bill_kwh',
@@ -598,7 +597,6 @@ export class RvEnergyCard extends LitElement {
                 .value=${periodKwh}
                 .digits=${7}
                 .decimals=${3}
-                .mult=${`× MULT ${this._config.meter_multiplier}`}
                 unit="kWh"
               ></meter-register>
               <div class="register-sub">

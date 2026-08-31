@@ -21,8 +21,6 @@ export class MeterRegister extends LitElement {
   /** How many trailing digits are the decimal (brass) window. */
   @property({ type: Number }) decimals = 1;
 
-  /** Optional multiplier badge text, e.g. "× MULT 40". Hidden when empty. */
-  @property({ type: String }) mult = '';
 
   /** Unit label shown to the right, e.g. "kWh". */
   @property({ type: String }) unit = 'kWh';
@@ -57,7 +55,7 @@ export class MeterRegister extends LitElement {
       }
       .digit {
         position: relative;
-        /* responsive: shrinks on narrow screens so all digits + unit + mult fit */
+        /* responsive: shrinks on narrow screens so all digits + unit fit */
         width: clamp(28px, 8.5vw, 40px);
         height: clamp(44px, 13vw, 62px);
         overflow: hidden;
@@ -117,20 +115,6 @@ export class MeterRegister extends LitElement {
         margin-left: 8px;
         padding-bottom: 8px;
       }
-      .mult {
-        align-self: center;
-        display: inline-flex;
-        align-items: center;
-        margin-left: 14px;
-        font-family: var(--font-mono);
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-        color: var(--brass);
-        border: 1px solid var(--brass-dim);
-        border-radius: 4px;
-        padding: 4px 8px;
-      }
       @media (prefers-reduced-motion: reduce) {
         .strip {
           transition: none;
@@ -156,7 +140,6 @@ export class MeterRegister extends LitElement {
           `;
         })}
         <span class="unit">${this.unit}</span>
-        ${this.mult ? html`<span class="mult">${this.mult}</span>` : ''}
       </div>
     `;
   }

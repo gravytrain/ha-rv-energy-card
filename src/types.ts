@@ -91,7 +91,6 @@ export interface RvEnergyCardConfig {
   show_weather_alerts?: boolean;
   base_rate_entity?: string;
   pca_rate_entity?: string;
-  meter_multiplier?: number;
   // billing reconciliation + invoices
   show_last_period?: boolean;
   show_invoices?: boolean;
