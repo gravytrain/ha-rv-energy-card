@@ -15,7 +15,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.13.5';
+const CARD_VERSION = '0.13.6';
 
 interface Site {
   key: 'north' | 'south' | 'shed';

@@ -80,6 +80,7 @@ export class RvOutageMap extends LitElement {
     }).addTo(this._layers);
     boundary.bringToFront();
     const outageLayers = new Map<string, L.Layer[]>();
+    const outageMarkers = new Map<string, L.CircleMarker>();
     const activeFootprints = L.geoJSON(this._vendorFeatures(this.outagePolygons), {
       pane: 'outage-footprints', style: { color: '#e64a3b', weight: 3, fillColor: '#e64a3b', fillOpacity: 0.35 },
       onEachFeature: (feature, layer) => {
@@ -103,24 +104,28 @@ export class RvOutageMap extends LitElement {
       const point = outage.outagePoint;
       if (!Number.isFinite(Number(point?.lat)) || !Number.isFinite(Number(point?.lng))) continue;
       const marker = L.circleMarker([Number(point!.lat), Number(point!.lng)], { pane: 'outage-markers', radius: 9, color: 'var(--ink, #fff0df)', weight: 2, fillColor: 'var(--needle, #c8483a)', fillOpacity: 1 }).addTo(this._layers);
-      marker.bindPopup('<b>' + (outage.outageName ?? 'ACTIVE OUTAGE') + '</b><br>' + Number(outage.customersOutNow ?? 0).toLocaleString() + ' customers out<br>' + (outage.crewAssigned ? 'Crew assigned' : 'Awaiting crew') + '<br>Started ' + this._fmt(outage.outageStartTime) + '<br>ETR ' + (outage.estimatedTimeOfRestoral ?? 'TBD'));
+      marker.bindPopup('<b>' + (outage.outageName ?? 'ACTIVE OUTAGE') + '</b><br>' + Number(outage.customersOutNow ?? 0).toLocaleString() + ' customers out<br>' + (outage.crewAssigned ? 'Crew assigned' : 'Awaiting crew') + '<br>Started ' + this._fmt(outage.outageStartTime) + '<br>ETR ' + (outage.estimatedTimeOfRestoral ?? 'TBD'), { autoPan: false });
       const id = this._outageKey(outage, index);
-      outageLayers.set(id, [...(outageLayers.get(id) ?? []), marker]);
+      outageMarkers.set(id, marker);
       marker.on('click', () => this._select('outage', id));
       bounds.extend(marker.getLatLng());
     }
     const viewKey = JSON.stringify({ counties: this.counties.map((county) => [county.name, county.customersOutNow]), outages: this.outages.map((outage) => [outage.outageName, outage.outagePoint]), outagePolygons: this.outagePolygons.length, plannedOutagePolygons: this.plannedOutagePolygons.length });
     const focusKey = this.selectedOutage ? `outage:${this.selectedOutage}` : this.selectedCounty ? `county:${this._key(this.selectedCounty)}` : '';
     if (focusKey && focusKey !== this._focusKey) {
-      const focused = this.selectedOutage
-        ? outageLayers.get(this.selectedOutage) ?? []
-        : [countyLayers.get(this._key(this.selectedCounty))].filter((layer): layer is L.Layer => !!layer);
-      const focusedGroup = L.featureGroup(focused);
+      const footprint = this.selectedOutage ? outageLayers.get(this.selectedOutage) ?? [] : [];
+      const county = this.selectedCounty ? countyLayers.get(this._key(this.selectedCounty)) : undefined;
+      const focusedGroup = L.featureGroup(county ? [county] : footprint);
       if (focusedGroup.getLayers().length && focusedGroup.getBounds().isValid()) {
-        this._map.fitBounds(focusedGroup.getBounds(), { padding: [42, 42], maxZoom: 14 });
-        const marker = focused.find((layer): layer is L.CircleMarker => layer instanceof L.CircleMarker);
-        marker?.openPopup();
+        this._map.fitBounds(focusedGroup.getBounds(), { padding: [42, 42], maxZoom: county ? 11 : 13 });
+      } else if (this.selectedOutage) {
+        // The vendor often supplies only a protective-device point, not an
+        // affected-area polygon. Keep enough context that it is not presented
+        // as a precise street-level outage boundary.
+        const marker = outageMarkers.get(this.selectedOutage);
+        if (marker) this._map.setView(marker.getLatLng(), 11);
       }
+      if (this.selectedOutage) outageMarkers.get(this.selectedOutage)?.openPopup();
     } else if (bounds.isValid() && (viewKey !== this._viewKey || (!focusKey && this._focusKey))) {
       this._map.fitBounds(bounds, { padding: [24, 24], maxZoom: 9 });
     }
