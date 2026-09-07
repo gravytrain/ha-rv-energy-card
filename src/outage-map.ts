@@ -10,6 +10,7 @@ type VendorPolygon = { outageRecId?: string; outageRecID?: string; outNow?: numb
 export class RvOutageMap extends LitElement {
   @property({ attribute: false }) counties: CountyStatus[] = [];
   @property({ attribute: false }) outages: OutageDetail[] = [];
+  @property({ type: String }) selectedOutage = '';
   @property({ type: String }) selectedCounty = '';
   @property({ attribute: false }) homeLocation?: { lat: number; lng: number };
   @property({ attribute: false }) outagePolygons: unknown[] = [];
@@ -18,10 +19,17 @@ export class RvOutageMap extends LitElement {
   private _map?: L.Map;
   private _layers?: L.LayerGroup;
   private _viewKey = '';
+  private _focusKey = '';
 
   protected updated() { this._syncMap(); }
   disconnectedCallback() { super.disconnectedCallback(); this._map?.remove(); this._map = undefined; }
   private _key(name?: string) { return (name ?? '').replace(/ county$/i, '').trim().toLowerCase(); }
+  private _outageKey(outage: OutageDetail, index: number) {
+    return String(outage.outageRecID ?? outage.outageName ?? `outage-${index}`);
+  }
+  private _select(type: 'outage' | 'county', value: string) {
+    this.dispatchEvent(new CustomEvent(`${type}-selected`, { detail: value, bubbles: true, composed: true }));
+  }
   private _fmt(value?: string) {
     const date = value ? new Date(value) : undefined;
     return !date || Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
@@ -52,6 +60,7 @@ export class RvOutageMap extends LitElement {
     const counties = new Map(this.counties.map((county) => [this._key(county.name), county]));
     const boundaryRenderer = L.canvas({ pane: 'outage-boundaries', padding: 0.5 });
     if (this.serviceArea) L.geoJSON(this.serviceArea, { pane: 'outage-boundaries', style: { color: '#7eaf83', weight: 2, dashArray: '5 5', fill: false } }).bindTooltip('Aiken Co-op service area', { sticky: true }).addTo(this._layers);
+    const countyLayers = new Map<string, L.Layer>();
     const boundary = L.geoJSON(serviceCounties as GeoJSON.GeoJsonObject, {
       pane: 'outage-boundaries',
       ...({ renderer: boundaryRenderer } as unknown as L.GeoJSONOptions),
@@ -61,11 +70,26 @@ export class RvOutageMap extends LitElement {
         const selected = this._key(this.selectedCounty) === this._key(feature?.properties?.NAME as string | undefined);
         return { color: selected ? '#d9a441' : affected ? '#c8483a' : '#35506b', weight: selected ? 5 : affected ? 3 : 2, fill: true, fillColor: affected ? '#c8483a' : selected ? '#d9a441' : '#6d8faa', fillOpacity: affected ? 0.62 : selected ? 0.42 : 0.16 };
       },
+      onEachFeature: (feature, layer) => {
+        const name = String(feature.properties?.NAME ?? '');
+        const county = counties.get(this._key(name));
+        countyLayers.set(this._key(name), layer);
+        layer.bindTooltip(`${name} County · ${Number(county?.customersOutNow ?? 0).toLocaleString()} out`, { sticky: true });
+        layer.on('click', () => this._select('county', name));
+      },
     }).addTo(this._layers);
     boundary.bringToFront();
+    const outageLayers = new Map<string, L.Layer[]>();
     const activeFootprints = L.geoJSON(this._vendorFeatures(this.outagePolygons), {
       pane: 'outage-footprints', style: { color: '#e64a3b', weight: 3, fillColor: '#e64a3b', fillOpacity: 0.35 },
-      onEachFeature: (feature, layer) => layer.bindTooltip('Outage area · ' + Number(feature.properties?.outNow ?? 0).toLocaleString() + ' out', { sticky: true }),
+      onEachFeature: (feature, layer) => {
+        const id = String(feature.properties?.outageRecId ?? '');
+        layer.bindTooltip('Outage area · ' + Number(feature.properties?.outNow ?? 0).toLocaleString() + ' out', { sticky: true });
+        if (id) {
+          outageLayers.set(id, [...(outageLayers.get(id) ?? []), layer]);
+          layer.on('click', () => this._select('outage', id));
+        }
+      },
     }).addTo(this._layers);
     L.geoJSON(this._vendorFeatures(this.plannedOutagePolygons), {
       pane: 'outage-footprints', style: { color: '#6bbf7b', weight: 3, dashArray: '6 4', fillColor: '#6bbf7b', fillOpacity: 0.2 },
@@ -75,15 +99,33 @@ export class RvOutageMap extends LitElement {
     if (activeFootprints.getBounds().isValid()) bounds.extend(activeFootprints.getBounds());
     const home = this.homeLocation;
     if (home) L.marker([home.lat, home.lng], { pane: 'outage-markers', icon: L.divIcon({ className: 'home-marker', html: 'Home' }) }).bindTooltip('Home', { permanent: false, direction: 'top' }).addTo(this._layers);
-    for (const outage of this.outages) {
+    for (const [index, outage] of this.outages.entries()) {
       const point = outage.outagePoint;
       if (!Number.isFinite(Number(point?.lat)) || !Number.isFinite(Number(point?.lng))) continue;
       const marker = L.circleMarker([Number(point!.lat), Number(point!.lng)], { pane: 'outage-markers', radius: 9, color: 'var(--ink, #fff0df)', weight: 2, fillColor: 'var(--needle, #c8483a)', fillOpacity: 1 }).addTo(this._layers);
       marker.bindPopup('<b>' + (outage.outageName ?? 'ACTIVE OUTAGE') + '</b><br>' + Number(outage.customersOutNow ?? 0).toLocaleString() + ' customers out<br>' + (outage.crewAssigned ? 'Crew assigned' : 'Awaiting crew') + '<br>Started ' + this._fmt(outage.outageStartTime) + '<br>ETR ' + (outage.estimatedTimeOfRestoral ?? 'TBD'));
+      const id = this._outageKey(outage, index);
+      outageLayers.set(id, [...(outageLayers.get(id) ?? []), marker]);
+      marker.on('click', () => this._select('outage', id));
       bounds.extend(marker.getLatLng());
     }
     const viewKey = JSON.stringify({ counties: this.counties.map((county) => [county.name, county.customersOutNow]), outages: this.outages.map((outage) => [outage.outageName, outage.outagePoint]), outagePolygons: this.outagePolygons.length, plannedOutagePolygons: this.plannedOutagePolygons.length });
-    if (bounds.isValid() && viewKey !== this._viewKey) { this._map.fitBounds(bounds, { padding: [24, 24], maxZoom: 9 }); this._viewKey = viewKey; }
+    const focusKey = this.selectedOutage ? `outage:${this.selectedOutage}` : this.selectedCounty ? `county:${this._key(this.selectedCounty)}` : '';
+    if (focusKey && focusKey !== this._focusKey) {
+      const focused = this.selectedOutage
+        ? outageLayers.get(this.selectedOutage) ?? []
+        : [countyLayers.get(this._key(this.selectedCounty))].filter((layer): layer is L.Layer => !!layer);
+      const focusedGroup = L.featureGroup(focused);
+      if (focusedGroup.getLayers().length && focusedGroup.getBounds().isValid()) {
+        this._map.fitBounds(focusedGroup.getBounds(), { padding: [42, 42], maxZoom: 14 });
+        const marker = focused.find((layer): layer is L.CircleMarker => layer instanceof L.CircleMarker);
+        marker?.openPopup();
+      }
+    } else if (bounds.isValid() && (viewKey !== this._viewKey || (!focusKey && this._focusKey))) {
+      this._map.fitBounds(bounds, { padding: [24, 24], maxZoom: 9 });
+    }
+    this._viewKey = viewKey;
+    this._focusKey = focusKey;
     requestAnimationFrame(() => this._map?.invalidateSize());
   }
   render() { return html`<div id="outage-leaflet-map" aria-label="OpenStreetMap view of the Aiken Co-op service territory"></div>`; }

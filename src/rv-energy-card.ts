@@ -15,7 +15,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.13.2';
+const CARD_VERSION = '0.13.5';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -470,8 +470,21 @@ export class RvEnergyCard extends LitElement {
 
   private _openMap = () => { this._mapOpen = true; };
   private _closeMap = () => { this._mapOpen = false; };
-  private _selectOutage = (name?: string) => { this._selectedOutage = name; };
-  private _selectCounty = (name?: string) => { this._selectedCounty = name; };
+  private _outageKey(outage: OutageDetail, index: number): string {
+    return String(outage.outageRecID ?? outage.outageName ?? `outage-${index}`);
+  }
+  private _selectOutage = (key?: string) => {
+    this._selectedOutage = key;
+    if (key) this._selectedCounty = undefined;
+  };
+  private _selectCounty = (name?: string) => {
+    this._selectedCounty = name;
+    if (name) this._selectedOutage = undefined;
+  };
+  private _clearMapFocus = () => {
+    this._selectedOutage = undefined;
+    this._selectedCounty = undefined;
+  };
 
   private _renderTerritoryMap(compact = false) {
     if (compact) {
@@ -479,12 +492,64 @@ export class RvEnergyCard extends LitElement {
       const county = this._outageCounties()[0];
       return html`<div class="impact-summary"><span>ACTIVE IMPACT</span><b>${county ? `${county.name} County - ${Number(county.customersOutNow).toLocaleString()} / ${Number(county.customersServed ?? 0).toLocaleString()} members out` : outage ? `${Number(outage.customersOutNow ?? 0).toLocaleString()} members out` : 'No active outages reported'}</b>${outage ? html`<small>${outage.outageName ?? 'ACTIVE OUTAGE'} - ${outage.crewAssigned ? 'crew assigned' : 'awaiting crew'} - since ${this._fmtIncidentTime(outage.outageStartTime)}</small>` : nothing}<button @click=${this._openMap}>Open live map</button></div>`;
     }
-    return html`<rv-outage-map .counties=${this._allCounties()} .outages=${this._outages()} .selectedCounty=${this._selectedCounty ?? ''} .homeLocation=${this._homeLocation()} .outagePolygons=${this._polygons('sensor.aiken_co_op_outage_polygons')} .plannedOutagePolygons=${this._polygons('sensor.aiken_co_op_planned_outage_polygons')} .serviceArea=${this._serviceArea()}></rv-outage-map>`;
+    return html`<rv-outage-map .counties=${this._allCounties()} .outages=${this._outages()} .selectedOutage=${this._selectedOutage ?? ''} .selectedCounty=${this._selectedCounty ?? ''} .homeLocation=${this._homeLocation()} .outagePolygons=${this._polygons('sensor.aiken_co_op_outage_polygons')} .plannedOutagePolygons=${this._polygons('sensor.aiken_co_op_planned_outage_polygons')} .serviceArea=${this._serviceArea()} @outage-selected=${(event: CustomEvent<string>) => this._selectOutage(event.detail)} @county-selected=${(event: CustomEvent<string>) => this._selectCounty(event.detail)}></rv-outage-map>`;
   }
 
   private _renderFullMap() {
-    const outages=this._outages(), selected=outages.find((o)=>o.outageName===this._selectedOutage)??outages[0];
-    return html`<div class="map-modal" role="dialog" aria-modal="true" @click=${this._closeMap}><section class="map-dialog" @click=${(e:Event)=>e.stopPropagation()}><header class="map-head"><div><div class="grid-cap">AIKEN CO-OP · LIVE OUTAGES</div><div class="map-title">Grid Territory</div></div><div><a href="${this._config.grid_map_link}" target="_blank" rel="noopener noreferrer">Vendor map ↗</a><button @click=${this._closeMap}>×</button></div></header><div class="map-summary"><span><b>${this._num(this._config.customers_out_entity)}</b> OUT NOW</span><span><b>${this._num('sensor.aiken_co_op_customers_affected')}</b> AFFECTED</span><span><b>${this._num('sensor.aiken_co_op_customers_restored')}</b> RESTORED</span><span><b>${this._num('sensor.aiken_co_op_planned_outages')}</b> PLANNED</span></div><div class="map-body"><div class="map-canvas">${this._renderTerritoryMap()}</div><aside class="map-aside"><div class="aside-cap">Active outages</div>${outages.length?outages.map((o)=>html`<button class="map-incident ${o===selected?'selected':''}" @click=${()=>this._selectOutage(o.outageName)}><b>${o.outageName??'ACTIVE OUTAGE'}</b><span>${o.customersOutNow??0} out · ${o.crewAssigned?'crew assigned':'awaiting crew'}</span></button>`):html`<div class="map-empty">No active incidents reported.</div>`}${selected?html`<div class="selected-detail"><span>Started</span><b>${this._fmtIncidentTime(selected.outageStartTime)}</b><span>Estimated restoration</span><b>${selected.estimatedTimeOfRestoral??'TBD'}</b></div>`:nothing}<div class="aside-cap">County status</div><div class="map-counties">${this._allCounties().sort((a,b)=>Number(b.customersOutNow)-Number(a.customersOutNow)).map((c)=>html`<button class="map-county ${Number(c.customersOutNow)>0?'affected':''}" @mouseenter=${()=>this._selectCounty(c.name)} @focus=${()=>this._selectCounty(c.name)} @mouseleave=${()=>this._selectCounty()} @blur=${()=>this._selectCounty()}>${c.name}<b>${Number(c.customersOutNow)} / ${Number(c.customersServed??0).toLocaleString()}</b></button>`)}</div></aside></div></section></div>`;
+    const outages = this._outages();
+    const selectedIndex = outages.findIndex((outage, index) =>
+      this._outageKey(outage, index) === this._selectedOutage
+    );
+    const selected = selectedIndex >= 0 ? outages[selectedIndex] : undefined;
+    return html`
+      <div class="map-modal" role="dialog" aria-modal="true" @click=${this._closeMap}>
+        <section class="map-dialog" @click=${(event: Event) => event.stopPropagation()}>
+          <header class="map-head">
+            <div><div class="grid-cap">AIKEN CO-OP · LIVE OUTAGES</div><div class="map-title">Grid Territory</div></div>
+            <div>
+              <button class="map-reset" @click=${this._clearMapFocus} ?disabled=${!this._selectedOutage && !this._selectedCounty}>Show all</button>
+              <a href="${this._config.grid_map_link}" target="_blank" rel="noopener noreferrer">Vendor map ↗</a>
+              <button aria-label="Close outage map" @click=${this._closeMap}>×</button>
+            </div>
+          </header>
+          <div class="map-summary">
+            <span><b>${this._num(this._config.customers_out_entity)}</b> OUT NOW</span>
+            <span><b>${this._num('sensor.aiken_co_op_customers_affected')}</b> AFFECTED</span>
+            <span><b>${this._num('sensor.aiken_co_op_customers_restored')}</b> RESTORED</span>
+            <span><b>${this._num('sensor.aiken_co_op_planned_outages')}</b> PLANNED</span>
+          </div>
+          <div class="map-body">
+            <div class="map-canvas">${this._renderTerritoryMap()}</div>
+            <aside class="map-aside">
+              <div class="aside-cap">Active outages · select to zoom</div>
+              ${outages.length ? outages.map((outage, index) => {
+                const key = this._outageKey(outage, index);
+                return html`
+                  <button class="map-incident ${key === this._selectedOutage ? 'selected' : ''}"
+                    aria-pressed=${key === this._selectedOutage} @click=${() => this._selectOutage(key)}>
+                    <b>${outage.outageName ?? 'ACTIVE OUTAGE'}</b>
+                    <span>${outage.customersOutNow ?? 0} out · ${outage.crewAssigned ? 'crew assigned' : 'awaiting crew'}</span>
+                  </button>`;
+              }) : html`<div class="map-empty">No active incidents reported.</div>`}
+              ${selected ? html`
+                <div class="selected-detail">
+                  <span>Started</span><b>${this._fmtIncidentTime(selected.outageStartTime)}</b>
+                  <span>Estimated restoration</span><b>${selected.estimatedTimeOfRestoral ?? 'TBD'}</b>
+                  ${selected.cause ? html`<span>Cause</span><b>${selected.cause}</b>` : nothing}
+                  ${selected.streetsAffected ? html`<span>Area</span><b>${selected.streetsAffected}</b>` : nothing}
+                </div>` : nothing}
+              <div class="aside-cap">County status · select to zoom</div>
+              <div class="map-counties">
+                ${this._allCounties().sort((a, b) => Number(b.customersOutNow) - Number(a.customersOutNow)).map((county) => html`
+                  <button class="map-county ${Number(county.customersOutNow) > 0 ? 'affected' : ''} ${this._selectedCounty === county.name ? 'selected' : ''}"
+                    aria-pressed=${this._selectedCounty === county.name} @click=${() => this._selectCounty(county.name)}>
+                    ${county.name}<b>${Number(county.customersOutNow)} / ${Number(county.customersServed ?? 0).toLocaleString()}</b>
+                  </button>`)}
+              </div>
+            </aside>
+          </div>
+        </section>
+      </div>`;
   }
   private _renderGridStatus(gridOk: boolean, customersOut: number) {
 
@@ -1312,6 +1377,9 @@ export class RvEnergyCard extends LitElement {
         font-family: var(--font-mono); font-size: 9px; letter-spacing: .04em;
       }
       .grid-incidents { flex-basis: 100%; border-top: 1px solid var(--hairline); padding-top: 11px; }
+      .map-head .map-reset { margin: 0 15px 0 0; padding: 5px 8px; border: 1px solid var(--brass-dim); border-radius: 4px; font-size: 10px; }
+      .map-head .map-reset:disabled { opacity: .38; cursor: default; }
+      .map-county.selected { background: color-mix(in srgb, var(--brass) 14%, transparent); color: var(--ink); outline: 1px solid var(--brass-dim); }
       .impact-summary{box-sizing:border-box;width:100%;max-width:100%;overflow:hidden;flex:1 0 100%;min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-rows:auto auto;column-gap:10px;align-items:center;flex-direction:column;gap:5px;padding:12px;border:1px solid var(--hairline);border-radius:5px;background:var(--meter-dark);font-family:var(--font-mono)}.impact-summary span{grid-column:1;grid-row:1;font-size:9px;letter-spacing:.14em;color:var(--ink-faint)}.impact-summary b{grid-column:2;grid-row:1;font-size:11px;color:var(--ink)}.impact-summary small{grid-column:2;grid-row:2;font-size:10px;color:var(--ink-dim)}.impact-summary button{grid-column:3;grid-row:1 / span 2;align-self:center;padding:0;border:0;background:none;color:var(--brass);font:10px var(--font-mono);cursor:pointer}.grid-map.native-map{padding:0;background:var(--meter-dark)}.grid-map.native-map button{position:absolute;right:6px;bottom:6px;z-index:1;border:1px solid var(--hairline);border-radius:3px;padding:4px 6px;color:var(--ink);background:color-mix(in srgb, var(--housing) 88%, transparent);font:9px var(--font-mono);cursor:pointer}.territory-map{width:100%;height:100%;display:block;background:var(--meter-dark)}.county{fill:var(--panel-2);stroke:var(--bezel);stroke-width:1.2}.county.affected{fill:color-mix(in srgb, var(--needle) 38%, var(--panel));stroke:var(--needle)}.county-name,.outage-label,.map-clear{fill:var(--ink-dim);font-family:var(--font-mono);font-size:12px}.outage-label{fill:var(--ink);font-size:11px}.outage-marker{cursor:pointer}.outage-halo{fill:color-mix(in srgb, var(--needle) 32%, transparent)}.outage-core{fill:var(--needle);stroke:var(--ink);stroke-width:1.5}.outage-marker.selected .outage-core{fill:var(--brass)}.map-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:22px;background:color-mix(in srgb, var(--meter-black) 76%, transparent)}.map-dialog{width:min(1100px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--bezel);border-radius:10px;background:var(--panel);box-shadow:0 30px 70px var(--meter-black)}.map-head{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid var(--hairline)}.map-title{margin-top:4px;font-family:var(--font-display);font-size:23px;color:var(--ink)}.map-head a,.map-head button{color:var(--brass);background:none;border:0;text-decoration:none;font-family:var(--font-mono);cursor:pointer}.map-head button{margin-left:15px;font-size:26px;line-height:1}.map-summary{display:flex;flex-wrap:wrap;padding:12px 20px;border-bottom:1px solid var(--hairline)}.map-summary span{padding:2px 16px;border-left:1px solid var(--hairline);color:var(--ink-dim);font:10px var(--font-mono)}.map-summary span:first-child{border-left:0;padding-left:0}.map-summary b{color:var(--needle);font-size:14px}.map-body{display:grid;grid-template-columns:minmax(0,1fr) 280px;min-height:480px}.map-canvas{min-height:420px;padding:18px}.map-aside{padding:18px;border-left:1px solid var(--hairline);background:var(--well)}.aside-cap{margin:0 0 9px;color:var(--ink-faint);font:9px var(--font-mono);letter-spacing:.14em;text-transform:uppercase}.map-incident{width:100%;margin-bottom:7px;padding:9px;text-align:left;border:1px solid var(--hairline);border-radius:4px;background:transparent;color:var(--ink);cursor:pointer}.map-incident.selected{border-color:var(--needle);background:color-mix(in srgb, var(--needle) 8%, transparent)}.map-incident b,.map-incident span{display:block}.map-incident b{font:11px var(--font-mono)}.map-incident span,.selected-detail span{color:var(--ink-dim);font:10px var(--font-mono)}.selected-detail{display:grid;gap:3px;padding:10px 0 16px}.selected-detail b{font:12px var(--font-mono);color:var(--ink)}.map-counties{display:grid;gap:4px}.map-counties span,.map-county{display:flex;justify-content:space-between;color:var(--ink-dim);font:10px var(--font-mono)}.map-counties span.affected b,.map-county.affected b{color:var(--needle)}.map-county{width:100%;padding:4px 0;border:0;border-radius:3px;background:transparent;text-align:left;cursor:pointer}.map-county:hover,.map-county:focus{background:color-mix(in srgb, var(--brass) 14%, transparent);color:var(--ink);outline:1px solid var(--brass-dim)}
       .incident { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); }
       .incident b { color: var(--needle); letter-spacing: .05em; }
