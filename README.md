@@ -143,6 +143,12 @@ normal-state experience. Use `nonzero` for a reading that is only useful when it
 has a non-zero value, or `always` for the rare reading that belongs on screen all
 the time. The inline area is a compact active-impact summary. Select Open live map for the Leaflet/OpenStreetMap territory view with locally bundled Census county polygons, live outage markers, and the vendor-map fallback.
 
+The full map also shows a 48-hour customers-out trend, live outage duration,
+and system/county impact percentages. After updating
+`aiken-coop-outage-monitoring.yaml`, reload the REST integration (or restart
+Home Assistant) once so `sensor.aiken_co_op_customers_out` begins retaining the
+vendor's `hourlyCustomersOut` history attribute used by the trend chart.
+
 
 ### NWS weather alerts and notifications
 

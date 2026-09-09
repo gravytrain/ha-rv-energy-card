@@ -34,6 +34,13 @@ export class RvOutageMap extends LitElement {
     const date = value ? new Date(value) : undefined;
     return !date || Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   }
+  private _duration(value?: string) {
+    const start = value ? new Date(value).getTime() : NaN;
+    if (!Number.isFinite(start)) return 'unavailable';
+    const minutes = Math.max(0, Math.floor((Date.now() - start) / 60000));
+    const days = Math.floor(minutes / 1440), hours = Math.floor((minutes % 1440) / 60);
+    return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+  }
   private _vendorFeatures(items: unknown[]): GeoJSON.FeatureCollection {
     const features: GeoJSON.Feature[] = [];
     for (const item of items) {
@@ -104,7 +111,7 @@ export class RvOutageMap extends LitElement {
       const point = outage.outagePoint;
       if (!Number.isFinite(Number(point?.lat)) || !Number.isFinite(Number(point?.lng))) continue;
       const marker = L.circleMarker([Number(point!.lat), Number(point!.lng)], { pane: 'outage-markers', radius: 9, color: 'var(--ink, #fff0df)', weight: 2, fillColor: 'var(--needle, #c8483a)', fillOpacity: 1 }).addTo(this._layers);
-      marker.bindPopup('<b>' + (outage.outageName ?? 'ACTIVE OUTAGE') + '</b><br>' + Number(outage.customersOutNow ?? 0).toLocaleString() + ' customers out<br>' + (outage.crewAssigned ? 'Crew assigned' : 'Awaiting crew') + '<br>Started ' + this._fmt(outage.outageStartTime) + '<br>ETR ' + (outage.estimatedTimeOfRestoral ?? 'TBD'), { autoPan: false });
+      marker.bindPopup('<b>' + (outage.outageName ?? 'ACTIVE OUTAGE') + '</b><br>' + Number(outage.customersOutNow ?? 0).toLocaleString() + ' customers out<br>Active ' + this._duration(outage.outageStartTime) + '<br>Started ' + this._fmt(outage.outageStartTime) + '<br>ETR ' + (outage.estimatedTimeOfRestoral ? this._fmt(outage.estimatedTimeOfRestoral) : 'In Review'), { autoPan: false });
       const id = this._outageKey(outage, index);
       outageMarkers.set(id, marker);
       marker.on('click', () => this._select('outage', id));

@@ -47,6 +47,11 @@ export interface OutageDetail {
   isPlanned?: boolean;
 }
 
+export interface OutageHistoryPoint {
+  customers?: number;
+  eventTime?: string;
+}
+
 export interface CountyStatus {
   name?: string;
   customersOutNow?: number;

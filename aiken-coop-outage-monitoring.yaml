@@ -30,6 +30,8 @@ rest:
         value_template: "{{ value_json.customersOutNow | default(0) }}"
         unit_of_measurement: "customers"
         icon: mdi:flash-alert
+        json_attributes:
+          - hourlyCustomersOut
       - name: "Aiken Co-op Customers Affected"
         value_template: "{{ value_json.customersAffected | default(0) }}"
         unit_of_measurement: "customers"
@@ -216,4 +218,3 @@ automation:
           data:
             tag: rv-power-weather
             group: rv-power-weather
-
