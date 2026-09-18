@@ -16,7 +16,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.14.0';
+const CARD_VERSION = '0.14.1';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -102,7 +102,7 @@ export class RvEnergyCard extends LitElement {
 
   setConfig(config: RvEnergyCardConfig) {
     this._config = {
-      billing_start_day: 12,
+      billing_start_day: 11,
       use_statistics: true,
       show_flow: true,
       show_billing: true,
@@ -241,38 +241,47 @@ export class RvEnergyCard extends LitElement {
         const prevEnd = start;
         const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
         const previousIds = SITES.flatMap((site) => [site.stat, site.legacyStat]);
+        // Include the hour immediately before the boundary so cumulative sums
+        // can be differenced without counting a statistic's lifetime offset.
+        const prevQueryStart = new Date(prevStart.getTime() - 60 * 60 * 1000);
         const prev = await this.hass.callWS<Record<string, StatisticRow[]>>({
           type: 'recorder/statistics_during_period',
-          start_time: prevStart.toISOString(),
+          start_time: prevQueryStart.toISOString(),
           end_time: prevEnd.toISOString(),
           statistic_ids: previousIds,
-          period: 'day',
-          types: ['change'],
+          period: 'hour',
+          types: ['sum', 'state'],
         });
         let total = 0;
         const bySite: Partial<Record<Site['key'], number>> = {};
         for (const site of SITES) {
-          // Prefer the durable external statistic. During the migration period,
-          // select the source with more daily buckets so July can still use the
-          // legacy history without ever adding the two cumulative series.
+          // Prefer whichever cumulative source covers more of the requested
+          // window. During migration this lets older periods use legacy history
+          // without ever adding the two lifetime series together.
           const candidates = [
             { rows: prev?.[site.stat], scale: 1 },
             { rows: prev?.[site.legacyStat], scale: site.key === 'shed' ? 0.001 : 1 },
           ];
+          const startMs = prevStart.getTime();
           const exclusiveEnd = prevEnd.getTime();
           let selected: StatisticRow[] = [];
           let scale = 1;
+          let selectedCoverage = 0;
           for (const candidate of candidates) {
             const rows = Array.isArray(candidate.rows)
               ? candidate.rows.filter((row) => row.start < exclusiveEnd)
               : [];
-            if (rows.length > selected.length) {
+            const coverage = rows.filter((row) => row.start >= startMs).length;
+            if (coverage > selectedCoverage) {
               selected = rows;
               scale = candidate.scale;
+              selectedCoverage = coverage;
             }
           }
           if (!selected.length) continue;
-          const sum = selected.reduce((a, r) => a + (r.change || 0), 0) * scale;
+          const usage = this._usageFromSums(selected, prevStart, prevEnd);
+          if (usage == null) continue;
+          const sum = usage * scale;
           total += sum;
           bySite[site.key] = sum;
         }
@@ -333,7 +342,10 @@ export class RvEnergyCard extends LitElement {
 
   private _fmtRange(a: Date, b: Date): string {
     const o: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
-    return `${a.toLocaleDateString('en-US', o)} → ${b.toLocaleDateString('en-US', o)}`;
+    // Statistics windows use an exclusive end; the co-op prints inclusive
+    // service dates, so show the preceding calendar day to match the bill.
+    const inclusiveEnd = new Date(b.getFullYear(), b.getMonth(), b.getDate() - 1);
+    return `${a.toLocaleDateString('en-US', o)} → ${inclusiveEnd.toLocaleDateString('en-US', o)}`;
   }
 
   private _gridStatus(): string {
@@ -1591,7 +1603,7 @@ export class RvEnergyCard extends LitElement {
   }
 
   static getStubConfig(): Partial<RvEnergyCardConfig> {
-    return { billing_start_day: 12, use_statistics: true };
+    return { billing_start_day: 11, use_statistics: true };
   }
 }
 

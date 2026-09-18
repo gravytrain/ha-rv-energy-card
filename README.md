@@ -41,7 +41,7 @@ Refoss backfill job is installed, the card gracefully falls back to the live
 
 ```yaml
 type: custom:rv-energy-card
-billing_start_day: 12
+billing_start_day: 11
 use_statistics: true
 ```
 
@@ -80,7 +80,7 @@ so corrections use a new bill revision. The NAS artifact/API contract is in
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `billing_start_day` | `12` | Day of month the billing period starts |
+| `billing_start_day` | `11` | First inclusive day of the billing period |
 | `use_statistics` | `true` | Pull period kWh from long-term statistics (gap-proof). Set `false` to force live sensors |
 | `show_flow` | `true` | Show the live power gauges section |
 | `show_billing` | `true` | Show the billing period section |
