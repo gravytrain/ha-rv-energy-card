@@ -16,7 +16,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.14.1';
+const CARD_VERSION = '0.14.2';
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -843,7 +843,9 @@ export class RvEnergyCard extends LitElement {
     const inLaws = allocation(northAndShed);
     const ours = allocation(south);
     const ledgerBill = this._ledgerBill();
-    const canReconcile = !ledgerBill || ledgerBill.status === 'draft' || ledgerBill.status === 'reconciled';
+    const immutable = ledgerBill
+      ? ['approved', 'invoice_requested', 'issued'].includes(ledgerBill.status)
+      : false;
 
     return html`
       <div class="sec-head">
@@ -916,8 +918,12 @@ export class RvEnergyCard extends LitElement {
                 <span class="ledger-state ${ledgerBill?.status ?? 'empty'}">
                   LEDGER · ${(ledgerBill?.status ?? 'not saved').replace(/_/g, ' ').toUpperCase()}
                 </span>
-                <button class="btn" @click=${this._saveAndReconcileBill} ?disabled=${this._ledgerBusy || !canReconcile}>
-                  ${ledgerBill ? '↻ Reconcile again' : '＋ Save & reconcile'}
+                <button class="btn" @click=${this._saveAndReconcileBill} ?disabled=${this._ledgerBusy}>
+                  ${immutable
+                    ? '＋ Correct as revision'
+                    : ledgerBill
+                      ? '↻ Reconcile again'
+                      : '＋ Save & reconcile'}
                 </button>
                 <button
                   class="btn primary"
@@ -1033,10 +1039,50 @@ export class RvEnergyCard extends LitElement {
 
   private _ledgerBill(): BillingLedgerBill | undefined {
     const entityId = this._config.billing_ledger_entity;
-    const latest = entityId ? this.hass?.states[entityId]?.attributes.latest_bill : undefined;
-    if (!latest || typeof latest !== 'object') return undefined;
-    const bill = latest as unknown as BillingLedgerBill;
-    return bill.bill_id === this._previousPeriod().billId ? bill : undefined;
+    const attributes = entityId ? this.hass?.states[entityId]?.attributes : undefined;
+    if (!attributes) return undefined;
+    const baseId = this._previousPeriod().billId;
+    const matches = (bill: unknown): bill is BillingLedgerBill => {
+      if (!bill || typeof bill !== 'object') return false;
+      const id = (bill as BillingLedgerBill).bill_id;
+      return id === baseId || new RegExp(`^${baseId}-r\\d+$`).test(id);
+    };
+    const byId = new Map<string, BillingLedgerBill>();
+    const summaries = attributes.bills;
+    if (Array.isArray(summaries)) {
+      for (const bill of summaries) {
+        if (matches(bill)) byId.set(bill.bill_id, bill);
+      }
+    }
+    // Prefer the full latest_bill record over its compact history entry when
+    // both refer to the displayed period.
+    const latest = attributes.latest_bill;
+    if (matches(latest)) byId.set(latest.bill_id, latest);
+    return [...byId.values()].sort(
+      (a, b) => this._billRevision(baseId, b.bill_id) - this._billRevision(baseId, a.bill_id),
+    )[0];
+  }
+
+  private _billRevision(baseId: string, billId: string): number {
+    if (billId === baseId) return 1;
+    const match = billId.match(new RegExp(`^${baseId}-r(\\d+)$`));
+    return match ? Number(match[1]) : 0;
+  }
+
+  private _nextBillRevisionId(baseId: string): string {
+    const entityId = this._config.billing_ledger_entity;
+    const attributes = entityId ? this.hass?.states[entityId]?.attributes : undefined;
+    const bills = Array.isArray(attributes?.bills) ? attributes.bills : [];
+    const latest = attributes?.latest_bill;
+    const ids = [
+      ...bills.map((bill) => (bill && typeof bill === 'object' ? (bill as BillingLedgerBill).bill_id : '')),
+      latest && typeof latest === 'object' ? (latest as BillingLedgerBill).bill_id : '',
+    ];
+    const maxRevision = ids.reduce(
+      (max, id) => Math.max(max, this._billRevision(baseId, id)),
+      1,
+    );
+    return `${baseId}-r${maxRevision + 1}`;
   }
 
   private _callLedger(service: string, serviceData: Record<string, unknown>) {
@@ -1060,6 +1106,11 @@ export class RvEnergyCard extends LitElement {
       return;
     }
     const period = this._previousPeriod();
+    const existing = this._ledgerBill();
+    const billId =
+      existing && ['approved', 'invoice_requested', 'issued'].includes(existing.status)
+        ? this._nextBillRevisionId(period.billId)
+        : existing?.bill_id ?? period.billId;
     const date = (value: Date) => {
       const y = value.getFullYear();
       const m = String(value.getMonth() + 1).padStart(2, '0');
@@ -1070,7 +1121,7 @@ export class RvEnergyCard extends LitElement {
     this._invoiceStatus = 'Saving utility bill and reconciliation snapshot…';
     try {
       await this._callLedger('upsert_bill', {
-        bill_id: period.billId,
+        bill_id: billId,
         period_start: date(period.start),
         period_end: date(period.end),
         billed_kwh: billedKwh,
@@ -1079,7 +1130,7 @@ export class RvEnergyCard extends LitElement {
         state_tax: this._num(this._config.last_bill_sc_tax_entity),
       });
       await this._callLedger('reconcile', {
-        bill_id: period.billId,
+        bill_id: billId,
         north_kwh: Math.round(north * 1e6) / 1e6,
         south_kwh: Math.round(south * 1e6) / 1e6,
         shed_kwh: Math.round(shed * 1e6) / 1e6,
