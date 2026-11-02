@@ -135,3 +135,20 @@ record_invoice:
           min: 1
           step: 1
           mode: box
+
+void_bill:
+  name: Void bill
+  description: >-
+    Mark a draft, reconciled, or approved bill as void (kept for audit, never
+    reused). Bills already sent for invoicing need a revision instead.
+  fields:
+    bill_id:
+      required: true
+      selector:
+        text:
+    reason:
+      required: true
+      example: "Entered with the wrong service dates"
+      selector:
+        text:
+          multiline: true

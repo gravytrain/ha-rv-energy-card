@@ -8,6 +8,9 @@ This contract separates the two durable records:
 
 All billing periods use a half-open interval: `period_start <= timestamp < period_end`.
 Dates are local calendar dates in `America/New_York`; kWh values are decimal numbers.
+The co-op's SERVICE FROM/TO dates are meter-read dates (each bill's TO is the next
+bill's FROM, and DAYS SERVICE = TO − FROM), so they map directly onto
+`period_start`/`period_end` with no adjustment. Read dates drift month to month.
 
 ## Bill identity and state
 
@@ -17,6 +20,11 @@ explicit suffix such as `-r2`; an approved or issued ledger entry is never edite
 The normal transition is:
 
 `draft -> reconciled -> approved -> invoice_requested -> issued`
+
+`void_bill` moves a `draft`, `reconciled`, or `approved` bill to `void`, recording
+the reason, user, and previous status. Void bills stay in storage for audit, are
+excluded from `latest_bill`, and their IDs are never reused. Bills that reached
+`invoice_requested` or `issued` have an artifact and are corrected by revision.
 
 The frozen reconciliation records all three site usages, total monitored usage,
 the utility's billed usage and charges, the rates visible at reconciliation time,

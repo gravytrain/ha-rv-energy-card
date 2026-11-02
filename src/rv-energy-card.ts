@@ -16,7 +16,18 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.14.2';
+const CARD_VERSION = '0.15.0';
+const DAY_MS = 86400000;
+const HOUR_MS = 3600000;
+
+/** A co-op bill window: [start, end) between two meter-read dates, local midnight. */
+interface BillPeriod {
+  start: Date;
+  end: Date;
+  billId: string;
+  /** True when the dates came from the bill-date helpers, not the fixed start-day fallback. */
+  fromBill: boolean;
+}
 
 interface Site {
   key: 'north' | 'south' | 'shed';
@@ -96,9 +107,20 @@ export class RvEnergyCard extends LitElement {
   @state() private _lastPeriodStats: Partial<Record<Site['key'], number>> = {};
   @state() private _invoiceStatus?: string;
   @state() private _ledgerBusy = false;
+  /** Bill id the last-period statistics belong to, so results for old dates are never shown. */
+  @state() private _lastPeriodKey?: string;
+  /** Whether the statistics span the entire bill window. */
+  @state() private _lastPeriodComplete = false;
+  /** The part of the bill window every site's statistics cover. */
+  @state() private _lastPeriodFrom?: Date;
+  @state() private _lastPeriodThrough?: Date;
+  /** Ledger bill awaiting a second click to confirm voiding. */
+  @state() private _confirmVoid?: string;
 
   private _statsTimer?: number;
   private _statsLoaded = false;
+  private _lastPeriodRequest = 0;
+  private _loadedPeriodKey?: string;
 
   setConfig(config: RvEnergyCardConfig) {
     this._config = {
@@ -124,6 +146,9 @@ export class RvEnergyCard extends LitElement {
       pca_rate_entity: 'input_number.current_pca_rate',
       show_last_period: true,
       show_invoices: true,
+      last_bill_start_entity: 'input_datetime.last_coop_bill_start',
+      last_bill_end_entity: 'input_datetime.last_coop_bill_end',
+      meter_multiplier: 40,
       last_bill_kwh_entity: 'input_number.last_coop_bill_kwh',
       last_bill_energy_entity: 'input_number.last_coop_bill_energy_charge',
       last_bill_local_tax_entity: 'input_number.last_coop_bill_local_tax',
@@ -138,12 +163,18 @@ export class RvEnergyCard extends LitElement {
   }
 
   protected updated(changed: PropertyValues) {
-    // Kick off statistics loading once hass is available.
-    if (changed.has('hass') && this.hass && !this._statsLoaded && this._config.use_statistics) {
+    if (!changed.has('hass') || !this.hass || !this._config.use_statistics) return;
+    const periodKey = this._lastBillPeriod()?.billId ?? 'none';
+    if (!this._statsLoaded) {
       this._statsLoaded = true;
+      this._loadedPeriodKey = periodKey;
       this._loadStatistics();
       // Refresh the authoritative baseline every 60s; live creep fills the gaps.
       this._statsTimer = window.setInterval(() => this._loadStatistics(), 60000);
+    } else if (periodKey !== this._loadedPeriodKey) {
+      // Bill dates were edited: requery immediately instead of waiting for the timer.
+      this._loadedPeriodKey = periodKey;
+      this._loadStatistics();
     }
   }
 
@@ -164,7 +195,25 @@ export class RvEnergyCard extends LitElement {
     return this._num(this._config.base_rate_entity) + this._num(this._config.pca_rate_entity);
   }
 
-  private _billingWindow(): { start: Date; end: Date } {
+  /** Parse a YYYY-MM-DD string as local midnight (never via Date's UTC parsing). */
+  private _localDate(value?: string): Date | undefined {
+    const match = value?.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return undefined;
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  private _isoDate(value: Date): string {
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const day = String(value.getDate()).padStart(2, '0');
+    return `${value.getFullYear()}-${month}-${day}`;
+  }
+
+  private _days(start: Date, end: Date): number {
+    return Math.round((end.getTime() - start.getTime()) / DAY_MS);
+  }
+
+  /** Legacy fixed-day cycle, used only on installs without the bill-date helpers. */
+  private _fixedDayWindow(): { start: Date; end: Date } {
     const startDay = this._config.billing_start_day ?? 12;
     const now = new Date();
     const start =
@@ -173,6 +222,61 @@ export class RvEnergyCard extends LitElement {
         : new Date(now.getFullYear(), now.getMonth() - 1, startDay);
     const end = new Date(start.getFullYear(), start.getMonth() + 1, startDay);
     return { start, end };
+  }
+
+  private _hasBillDateEntities(): boolean {
+    const states = this.hass?.states ?? {};
+    return !!(states[this._config.last_bill_start_entity ?? ''] && states[this._config.last_bill_end_entity ?? '']);
+  }
+
+  /**
+   * The co-op bill being reconciled. Its SERVICE FROM/TO dates are meter-read
+   * dates (one bill's TO is the next bill's FROM), so the window is [from, to)
+   * at local midnight. Undefined while the entered dates are incomplete.
+   */
+  private _lastBillPeriod(): BillPeriod | undefined {
+    if (this._hasBillDateEntities()) {
+      const states = this.hass!.states;
+      const start = this._localDate(states[this._config.last_bill_start_entity!].state);
+      const end = this._localDate(states[this._config.last_bill_end_entity!].state);
+      if (!start || !end || start >= end) return undefined;
+      return { start, end, billId: `${this._isoDate(start)}_${this._isoDate(end)}`, fromBill: true };
+    }
+    const { start: end } = this._fixedDayWindow();
+    const start = new Date(end.getFullYear(), end.getMonth() - 1, end.getDate());
+    return { start, end, billId: `${this._isoDate(start)}_${this._isoDate(end)}`, fromBill: false };
+  }
+
+  /**
+   * The in-progress (unbilled) period. It starts at the last bill's read date;
+   * the next read is estimated one cycle later because the co-op's read day drifts.
+   */
+  private _billingWindow(): { start: Date; end: Date } {
+    const last = this._lastBillPeriod();
+    if (last?.fromBill && last.end.getTime() <= Date.now()) {
+      const cycleDays = this._days(last.start, last.end);
+      const end = new Date(last.end.getFullYear(), last.end.getMonth(), last.end.getDate() + cycleDays);
+      return { start: last.end, end };
+    }
+    return this._fixedDayWindow();
+  }
+
+  /** Whether hourly rows span the whole [start, end) window, and which part they cover. */
+  private _coverage(
+    rows: StatisticRow[],
+    start: Date,
+    end: Date,
+  ): { complete: boolean; from?: Date; through?: Date } {
+    const usable = rows.filter((row) => Number.isFinite(row.sum)).sort((a, b) => a.start - b.start);
+    if (!usable.length) return { complete: false };
+    // The query starts one hour early, so a covering series has a row at or before `start`.
+    const firstStart = usable[0].start;
+    const lastEnd = usable[usable.length - 1].start + HOUR_MS;
+    return {
+      complete: firstStart <= start.getTime() && lastEnd >= end.getTime(),
+      from: new Date(Math.max(firstStart, start.getTime())),
+      through: new Date(Math.min(lastEnd, end.getTime())),
+    };
   }
 
   /**
@@ -206,11 +310,13 @@ export class RvEnergyCard extends LitElement {
     const { start, end } = this._billingWindow();
     const ids = SITES.map((s) => s.stat);
     try {
-      const queryStart = new Date(start.getTime() - 60 * 60 * 1000);
+      const queryStart = new Date(start.getTime() - HOUR_MS);
+      // A late bill can leave the estimated end in the past; never cut off live data.
+      const queryEnd = new Date(Math.max(end.getTime(), Date.now()));
       const result = await this.hass.callWS<Record<string, StatisticRow[]>>({
         type: 'recorder/statistics_during_period',
         start_time: queryStart.toISOString(),
-        end_time: end.toISOString(),
+        end_time: queryEnd.toISOString(),
         statistic_ids: ids,
         period: 'hour',
         types: ['sum', 'state'],
@@ -220,7 +326,7 @@ export class RvEnergyCard extends LitElement {
       for (const site of SITES) {
         const rows = result?.[site.stat];
         if (Array.isArray(rows) && rows.length) {
-          const usage = this._usageFromSums(rows, start, end);
+          const usage = this._usageFromSums(rows, start, queryEnd);
           if (usage == null) continue;
           stats[site.key] = usage;
           // Capture the live cumulative reading NOW so we can add real-time creep
@@ -235,11 +341,20 @@ export class RvEnergyCard extends LitElement {
       this._statsAnchor = {};
     }
 
-    // Also load the previous period's monitored total for reconciliation.
-    if (this._config.show_last_period) {
+    // Also load the monitored total for the bill's exact service window.
+    const period = this._lastBillPeriod();
+    if (this._config.show_last_period && !period) {
+      this._lastPeriodKey = undefined;
+      this._lastPeriodMonitored = undefined;
+      this._lastPeriodStats = {};
+      this._lastPeriodComplete = false;
+      this._lastPeriodFrom = undefined;
+      this._lastPeriodThrough = undefined;
+    } else if (this._config.show_last_period && period) {
+      const request = ++this._lastPeriodRequest;
       try {
-        const prevEnd = start;
-        const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
+        const prevStart = period.start;
+        const prevEnd = period.end;
         const previousIds = SITES.flatMap((site) => [site.stat, site.legacyStat]);
         // Include the hour immediately before the boundary so cumulative sums
         // can be differenced without counting a statistic's lifetime offset.
@@ -252,7 +367,11 @@ export class RvEnergyCard extends LitElement {
           period: 'hour',
           types: ['sum', 'state'],
         });
+        if (request !== this._lastPeriodRequest) return; // dates changed mid-query
         let total = 0;
+        let complete = true;
+        let from: Date | undefined;
+        let through: Date | undefined;
         const bySite: Partial<Record<Site['key'], number>> = {};
         for (const site of SITES) {
           // Prefer whichever cumulative source covers more of the requested
@@ -278,6 +397,10 @@ export class RvEnergyCard extends LitElement {
               selectedCoverage = coverage;
             }
           }
+          const coverage = this._coverage(selected, prevStart, prevEnd);
+          complete = complete && coverage.complete;
+          if (coverage.from && (!from || coverage.from > from)) from = coverage.from;
+          if (coverage.through && (!through || coverage.through < through)) through = coverage.through;
           if (!selected.length) continue;
           const usage = this._usageFromSums(selected, prevStart, prevEnd);
           if (usage == null) continue;
@@ -287,9 +410,18 @@ export class RvEnergyCard extends LitElement {
         }
         this._lastPeriodMonitored = total;
         this._lastPeriodStats = bySite;
+        this._lastPeriodComplete = complete;
+        this._lastPeriodFrom = from;
+        this._lastPeriodThrough = through;
+        this._lastPeriodKey = period.billId;
       } catch {
+        if (request !== this._lastPeriodRequest) return;
         this._lastPeriodMonitored = undefined;
         this._lastPeriodStats = {};
+        this._lastPeriodComplete = false;
+        this._lastPeriodFrom = undefined;
+        this._lastPeriodThrough = undefined;
+        this._lastPeriodKey = undefined;
       }
     }
   }
@@ -342,10 +474,9 @@ export class RvEnergyCard extends LitElement {
 
   private _fmtRange(a: Date, b: Date): string {
     const o: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric' };
-    // Statistics windows use an exclusive end; the co-op prints inclusive
-    // service dates, so show the preceding calendar day to match the bill.
-    const inclusiveEnd = new Date(b.getFullYear(), b.getMonth(), b.getDate() - 1);
-    return `${a.toLocaleDateString('en-US', o)} → ${inclusiveEnd.toLocaleDateString('en-US', o)}`;
+    // Co-op service dates are meter-read dates: a bill's TO date is the next
+    // bill's FROM date, so the exclusive end is shown exactly as printed.
+    return `${a.toLocaleDateString('en-US', o)} → ${b.toLocaleDateString('en-US', o)}`;
   }
 
   private _gridStatus(): string {
@@ -683,8 +814,9 @@ export class RvEnergyCard extends LitElement {
     const rate = this._rate();
     const { start, end } = this._billingWindow();
     const now = new Date();
-    const daysElapsed = Math.max(1, Math.round((now.getTime() - start.getTime()) / 86400000));
-    const daysTotal = Math.round((end.getTime() - start.getTime()) / 86400000);
+    const daysElapsed = Math.max(1, Math.round((now.getTime() - start.getTime()) / DAY_MS));
+    // Past the estimated read date the new bill just hasn't been entered yet.
+    const daysTotal = Math.max(this._days(start, end), daysElapsed);
 
     const totalPower = this._num(this._config.total_power_entity);
     const todayKwh = SITES.reduce((a, s) => a + this._num(s.today), 0);
@@ -813,29 +945,31 @@ export class RvEnergyCard extends LitElement {
   }
 
   /**
-   * Last billing period reconciliation — monitored total vs the co-op bill,
-   * with a variance readout. Confirms the gap-proof statistics stay accurate
-   * against the authoritative paper bill.
+   * Bill reconciliation: the six values typed from the co-op bill, the device
+   * statistics for exactly those service dates, the variance, and the split.
    */
   private _renderLastPeriod(_rate: number) {
-    const { start } = this._billingWindow();
-    // previous window = [start-1 month, start)
-    const prevStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
-    const prevEnd = start;
+    const period = this._lastBillPeriod();
     const billed = this._num(this._config.last_bill_kwh_entity);
     // Real dollar amounts entered from the paper bill (energy + both taxes).
     const billEnergy = this._num(this._config.last_bill_energy_entity);
     const billLocal = this._num(this._config.last_bill_local_tax_entity);
     const billSc = this._num(this._config.last_bill_sc_tax_entity);
     const billTotal = billEnergy + billLocal + billSc;
-    const monitored = this._lastPeriodMonitored ?? 0;
-    const haveData = monitored > 0 && billed > 0;
+    const statsReady = !!period && this._lastPeriodKey === period.billId;
+    const monitored = statsReady ? this._lastPeriodMonitored ?? 0 : 0;
+    const haveData = statsReady && monitored > 0 && billed > 0;
     const varKwh = monitored - billed;
     const varPct = billed > 0 ? (varKwh / billed) * 100 : 0;
-    const within = Math.abs(varPct) <= 2;
+    // Register reads are whole numbers × MULTI, so the billed kWh itself is
+    // only accurate to ± one multiplier step.
+    const resolution = this._config.meter_multiplier ?? 0;
+    const withinResolution = resolution > 0 && Math.abs(varKwh) < resolution;
+    const within = withinResolution || Math.abs(varPct) <= 2;
     const sign = varKwh >= 0 ? '+' : '';
-    const northAndShed = (this._lastPeriodStats.north ?? 0) + (this._lastPeriodStats.shed ?? 0);
-    const south = this._lastPeriodStats.south ?? 0;
+    const stats = statsReady ? this._lastPeriodStats : {};
+    const northAndShed = (stats.north ?? 0) + (stats.shed ?? 0);
+    const south = stats.south ?? 0;
     const allocation = (kwh: number) => {
       const share = monitored > 0 ? kwh / monitored : 0;
       return { share, billedKwh: billed * share, total: billTotal * share };
@@ -846,14 +980,47 @@ export class RvEnergyCard extends LitElement {
     const immutable = ledgerBill
       ? ['approved', 'invoice_requested', 'issued'].includes(ledgerBill.status)
       : false;
+    const canReconcile = haveData && this._lastPeriodComplete;
+    const meta = period
+      ? `${this._fmtRange(period.start, period.end)} · ${this._days(period.start, period.end)} DAYS`
+      : 'ENTER SERVICE DATES';
+
+    let statusNote;
+    if (!period) {
+      statusNote = html`Enter the bill's <b>Service from</b> and <b>to</b> dates (the meter-read
+        dates under SERVICE) to load the monitored usage for that window.`;
+    } else if (!statsReady) {
+      statusNote = html`Loading device statistics for ${this._fmtRange(period.start, period.end)}…`;
+    } else if (!this._lastPeriodComplete) {
+      const stamp = (value: Date) =>
+        value.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' });
+      statusNote = html`Device statistics only cover
+        ${this._lastPeriodFrom && this._lastPeriodThrough
+          ? html`<b class="warn">${stamp(this._lastPeriodFrom)} → ${stamp(this._lastPeriodThrough)}</b> of`
+          : html`<b class="warn">none</b> of`}
+        this window. Check the service dates; it can't be reconciled until it is fully covered.`;
+    } else if (billed <= 0) {
+      statusNote = html`Enter the bill's kWh to compare it with the monitored usage.`;
+    } else if (within) {
+      statusNote = withinResolution
+        ? html`Monitored usage matches the bill within the meter's
+            <b>±${resolution} kWh</b> reading resolution (×${resolution} multiplier).`
+        : html`Monitored usage matches the bill to <b>within ${Math.abs(varPct).toFixed(1)}%</b>.`;
+    } else {
+      statusNote = html`Monitored usage is <b class="warn">${sign}${varPct.toFixed(1)}%</b>
+        (${sign}${varKwh.toFixed(1)} kWh) off the bill${resolution > 0
+          ? html` — more than the meter's ±${resolution} kWh reading resolution`
+          : nothing}. Check that the service dates match the bill.`;
+    }
 
     return html`
       <div class="sec-head">
-        <span class="idx">§</span><h2>Last Billing Period</h2>
+        <span class="idx">§</span><h2>Bill Reconciliation</h2>
         <span class="rule"></span>
-        <span class="meta">${this._fmtRange(prevStart, prevEnd)}</span>
+        <span class="meta">${meta}</span>
       </div>
       <div class="meter">
+        ${this._renderBillEntry()}
         ${haveData
           ? html`
               <div class="recon">
@@ -870,18 +1037,6 @@ export class RvEnergyCard extends LitElement {
                   <div class="recon-k2">
                     ${billTotal > 0 ? html`$${billTotal.toFixed(2)}` : nothing}
                   </div>
-                  <div class="recon-edit">
-                    <input
-                      type="number"
-                      class="bill-input"
-                      .value=${billed.toString()}
-                      @change=${this._updateBilledKwh}
-                      min="0"
-                      step="0.1"
-                      placeholder="Bill kWh"
-                    />
-                    <span class="edit-hint">edit to update</span>
-                  </div>
                 </div>
                 <div class="recon-col">
                   <div class="recon-k">Variance vs bill</div>
@@ -891,81 +1046,132 @@ export class RvEnergyCard extends LitElement {
                   <div class="recon-k2">${sign}${varKwh.toFixed(1)} kWh</div>
                 </div>
               </div>
-              <div class="var-note">
-                ${within
-                  ? html`Monitored total matched the co-op bill to
-                      <b>within ${Math.abs(varPct).toFixed(1)}%</b> — gaps backfilled from
-                      device statistics.`
-                  : html`Monitored total is <b>${sign}${varPct.toFixed(1)}%</b> off the co-op
-                      bill — worth a look.`}
-              </div>
-              ${northAndShed > 0 && south > 0
-                ? html`<div class="allocation" aria-label="Last billing period allocation">
-                    <div class="allocation-head">Last-period allocation · tax included</div>
-                    <div class="allocation-row">
-                      <span><i class="dot north"></i><i class="dot shed"></i>North + She-Shed</span>
-                      <span>${northAndShed.toFixed(1)} kWh · ${(inLaws.share * 100).toFixed(1)}%</span>
-                      <b>${inLaws.billedKwh.toFixed(1)} billed kWh · &#36;${inLaws.total.toFixed(2)}</b>
-                    </div>
-                    <div class="allocation-row">
-                      <span><i class="dot south"></i>South</span>
-                      <span>${south.toFixed(1)} kWh · ${(ours.share * 100).toFixed(1)}%</span>
-                      <b>${ours.billedKwh.toFixed(1)} billed kWh · &#36;${ours.total.toFixed(2)}</b>
-                    </div>
-                  </div>`
-                : nothing}
-              <div class="ledger-actions">
-                <span class="ledger-state ${ledgerBill?.status ?? 'empty'}">
-                  LEDGER · ${(ledgerBill?.status ?? 'not saved').replace(/_/g, ' ').toUpperCase()}
-                </span>
-                <button class="btn" @click=${this._saveAndReconcileBill} ?disabled=${this._ledgerBusy}>
-                  ${immutable
-                    ? '＋ Correct as revision'
-                    : ledgerBill
-                      ? '↻ Reconcile again'
-                      : '＋ Save & reconcile'}
-                </button>
-                <button
-                  class="btn primary"
-                  @click=${this._approveBill}
-                  ?disabled=${this._ledgerBusy || ledgerBill?.status !== 'reconciled'}
-                >✓ Approve snapshot</button>
-              </div>
             `
-          : html`<div class="var-note">
-              Set <code>${this._config.last_bill_kwh_entity}</code> to the co-op's billed kWh to
-              see the reconciliation.
-            </div>`}
+          : nothing}
+        <div class="var-note">${statusNote}</div>
+        ${haveData && northAndShed > 0 && south > 0
+          ? html`<div class="allocation" aria-label="Bill allocation">
+              <div class="allocation-head">Bill allocation · tax included</div>
+              <div class="allocation-row">
+                <span><i class="dot north"></i><i class="dot shed"></i>North + She-Shed</span>
+                <span>${northAndShed.toFixed(1)} kWh · ${(inLaws.share * 100).toFixed(1)}%</span>
+                <b>${inLaws.billedKwh.toFixed(1)} billed kWh · &#36;${inLaws.total.toFixed(2)}</b>
+              </div>
+              <div class="allocation-row">
+                <span><i class="dot south"></i>South</span>
+                <span>${south.toFixed(1)} kWh · ${(ours.share * 100).toFixed(1)}%</span>
+                <b>${ours.billedKwh.toFixed(1)} billed kWh · &#36;${ours.total.toFixed(2)}</b>
+              </div>
+            </div>`
+          : nothing}
+        ${period
+          ? html`<div class="ledger-actions">
+              <span class="ledger-state ${ledgerBill?.status ?? 'empty'}">
+                LEDGER · ${(ledgerBill?.status ?? 'not saved').replace(/_/g, ' ').toUpperCase()}
+              </span>
+              <button
+                class="btn"
+                @click=${this._saveAndReconcileBill}
+                ?disabled=${this._ledgerBusy || !canReconcile}
+              >
+                ${immutable
+                  ? '＋ Correct as revision'
+                  : ledgerBill
+                    ? '↻ Reconcile again'
+                    : '＋ Save & reconcile'}
+              </button>
+              <button
+                class="btn primary"
+                @click=${this._approveBill}
+                ?disabled=${this._ledgerBusy || ledgerBill?.status !== 'reconciled'}
+              >✓ Approve snapshot</button>
+            </div>`
+          : nothing}
       </div>
     `;
   }
 
+  /** The six values copied from each co-op bill, written straight to their helpers. */
+  private _renderBillEntry() {
+    const state = (entity?: string) => this.hass?.states[entity ?? '']?.state ?? '';
+    const numberValue = (entity?: string) => {
+      const value = parseFloat(state(entity));
+      return Number.isFinite(value) ? String(value) : '';
+    };
+    const dateValue = (entity?: string) => (this._localDate(state(entity)) ? state(entity) : '');
+    const dates = this._hasBillDateEntities();
+    const field = (label: string, entity: string | undefined, step: string) => html`
+      <label class="bill-field">
+        <span>${label}</span>
+        <input
+          type="number"
+          class="bill-input"
+          min="0"
+          step=${step}
+          data-entity=${entity ?? ''}
+          .value=${numberValue(entity)}
+          ?disabled=${!entity || !this.hass?.states[entity] || this._ledgerBusy}
+          @change=${this._setBillNumber}
+        />
+      </label>
+    `;
+    return html`
+      <div class="bill-entry" aria-label="Co-op bill values">
+        ${dates
+          ? html`
+              <label class="bill-field">
+                <span>Service from</span>
+                <input
+                  type="date"
+                  class="bill-input"
+                  data-entity=${this._config.last_bill_start_entity}
+                  .value=${dateValue(this._config.last_bill_start_entity)}
+                  ?disabled=${this._ledgerBusy}
+                  @change=${this._setBillDate}
+                />
+              </label>
+              <label class="bill-field">
+                <span>Service to</span>
+                <input
+                  type="date"
+                  class="bill-input"
+                  data-entity=${this._config.last_bill_end_entity}
+                  .value=${dateValue(this._config.last_bill_end_entity)}
+                  ?disabled=${this._ledgerBusy}
+                  @change=${this._setBillDate}
+                />
+              </label>
+            `
+          : nothing}
+        ${field('kWh', this._config.last_bill_kwh_entity, '1')}
+        ${field('Energy $', this._config.last_bill_energy_entity, '0.01')}
+        ${field('Local tax $', this._config.last_bill_local_tax_entity, '0.01')}
+        ${field('SC tax $', this._config.last_bill_sc_tax_entity, '0.01')}
+      </div>
+      ${dates
+        ? nothing
+        : html`<div class="var-note">
+            Create <code>${this._config.last_bill_start_entity}</code> and
+            <code>${this._config.last_bill_end_entity}</code> (date-only input_datetime helpers) to
+            reconcile on the bill's own service dates instead of a fixed start day.
+          </div>`}
+    `;
+  }
+
   /**
-   * Invoices — generate the current invoice, and link out to stored invoice
-   * PDFs (per-month deep link) and the co-op bill folder.
+   * Invoices — generate the in-laws' invoice from the approved snapshot, and
+   * list recent ledger bills with their own service dates.
    */
   private _renderInvoices() {
+    const plan = this._invoicePlan();
+    const canGenerate = plan?.bill.status === 'approved';
+    const history = this._ledgerHistory()
+      .filter((bill) => bill.status !== 'void')
+      .slice(0, 6);
     const base = this._config.invoice_url_base;
-    const usage = this._invoiceUsage();
-    const ledgerBill = this._ledgerBill();
-    const canGenerate = ledgerBill?.status === 'approved';
-    // Invoices exist only for COMPLETED billing periods. The current window's
-    // start is the in-progress (unbilled) period, so completed periods begin at
-    // start−1 month, start−2, etc. The invoice file is keyed by each period's
-    // START month (matching the script's `calc_period_start[:7]`), so the label
-    // and the deep-link YYYY-MM must both use the period-start month.
-    const { start } = this._billingWindow();
-    const startDay = this._config.billing_start_day ?? 12;
-    const months: { label: string; ym: string }[] = [];
-    for (let i = 1; i <= 4; i++) {
-      const periodStart = new Date(start.getFullYear(), start.getMonth() - i, startDay);
-      const periodEnd = new Date(start.getFullYear(), start.getMonth() - i + 1, startDay);
-      const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-      months.push({
-        label: `${fmt(periodStart)} – ${fmt(periodEnd)}`,
-        ym: `${periodStart.getFullYear()}-${String(periodStart.getMonth() + 1).padStart(2, '0')}`,
-      });
-    }
+    // invoice_url_base ends in a filename prefix ("…/invoices/invoice-"); its
+    // directory is the NAS listing, which also holds pre-ledger invoices.
+    const listing = base ? base.slice(0, base.lastIndexOf('/') + 1) : undefined;
 
     return html`
       <div class="sec-head">
@@ -979,12 +1185,10 @@ export class RvEnergyCard extends LitElement {
             ? html`<button
                 class="btn primary"
                 @click=${this._generateInvoice}
-                ?disabled=${!usage || !canGenerate || this._ledgerBusy}
-                title=${usage
-                  ? canGenerate
-                    ? `Generate from approved snapshot and ${usage.total.toFixed(1)} kWh of authoritative monitored usage`
-                    : 'Save, reconcile, and approve the bill snapshot first'
-                  : 'Waiting for complete last-period statistics and billed kWh'}
+                ?disabled=${!canGenerate || this._ledgerBusy}
+                title=${canGenerate
+                  ? `Generate from the approved snapshot: $${plan!.amount.toFixed(2)}`
+                  : 'Save, reconcile, and approve the bill snapshot first'}
               >
                 ⎙ Generate invoice
               </button>`
@@ -998,69 +1202,86 @@ export class RvEnergyCard extends LitElement {
                 >↗ View co-op bills</a
               >`
             : nothing}
-          ${usage
+          ${listing
+            ? html`<a class="btn" href="${listing}" target="_blank" rel="noopener noreferrer"
+                >↗ All invoices</a
+              >`
+            : nothing}
+          ${plan
             ? html`<span class="invoice-preview">
-                ${usage.total.toFixed(1)} kWh · North ${usage.north.toFixed(1)} + She-Shed ${usage.shed.toFixed(1)}
+                North ${plan.north.toFixed(1)} + She-Shed ${plan.shed.toFixed(1)} =
+                ${(plan.north + plan.shed).toFixed(1)} billed kWh · $${plan.amount.toFixed(2)}
               </span>`
             : nothing}
         </div>
         ${this._invoiceStatus ? html`<div class="invoice-status">${this._invoiceStatus}</div>` : nothing}
         <div class="invoice-list">
-          ${months.map(
-            (m) => html`
-              <div class="invoice-row">
-                <span class="p">${m.label}</span>
-                <span class="s">
-                  ${base
-                    ? html`<a href="${base}${m.ym}.pdf" target="_blank" rel="noopener noreferrer"
-                        >invoice ↗</a
-                      >`
-                    : nothing}
-                </span>
-              </div>
-            `
-          )}
+          ${history.length
+            ? history.map((bill) => this._renderHistoryRow(bill))
+            : html`<div class="invoice-row"><span class="p">No bills in the ledger yet.</span></div>`}
         </div>
       </div>
     `;
   }
 
-  private _previousPeriod(): { start: Date; end: Date; billId: string } {
-    const { start } = this._billingWindow();
-    const previous = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
-    const date = (value: Date) => {
-      const y = value.getFullYear();
-      const m = String(value.getMonth() + 1).padStart(2, '0');
-      const d = String(value.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    };
-    return { start: previous, end: start, billId: `${date(previous)}_${date(start)}` };
+  private _renderHistoryRow(bill: BillingLedgerBill) {
+    const start = this._localDate(bill.period_start);
+    const end = this._localDate(bill.period_end);
+    const revision = bill.bill_id.match(/-(r\d+)$/)?.[1];
+    const variance = bill.variance_pct ?? bill.reconciliation?.variance_pct;
+    const voidable = ['draft', 'reconciled', 'approved'].includes(bill.status);
+    const confirming = this._confirmVoid === bill.bill_id;
+    return html`
+      <div class="invoice-row">
+        <span class="p">
+          ${start && end ? this._fmtRange(start, end) : bill.bill_id}
+          ${revision ? html`<small>${revision.toUpperCase()}</small>` : nothing}
+        </span>
+        <span class="m">
+          ${Number(bill.billed_kwh).toFixed(0)} kWh · $${Number(bill.bill_total).toFixed(2)}${variance != null
+            ? ` · ${variance >= 0 ? '+' : ''}${variance.toFixed(1)}%`
+            : ''}
+        </span>
+        <span class="s">
+          <span class="ledger-state ${bill.status}">${bill.status.replace(/_/g, ' ').toUpperCase()}</span>
+          ${bill.invoice_url
+            ? html`<a href="${bill.invoice_url}" target="_blank" rel="noopener noreferrer">invoice ↗</a>`
+            : nothing}
+          ${voidable
+            ? html`<button
+                class="link-btn ${confirming ? 'confirm' : ''}"
+                @click=${() => this._voidBill(bill.bill_id)}
+                ?disabled=${this._ledgerBusy}
+              >${confirming ? 'confirm void' : 'void'}</button>`
+            : nothing}
+        </span>
+      </div>
+    `;
   }
 
-  private _ledgerBill(): BillingLedgerBill | undefined {
+  /** Ledger bills, newest first: compact history rows merged with the full latest record. */
+  private _ledgerHistory(): BillingLedgerBill[] {
     const entityId = this._config.billing_ledger_entity;
     const attributes = entityId ? this.hass?.states[entityId]?.attributes : undefined;
-    if (!attributes) return undefined;
-    const baseId = this._previousPeriod().billId;
-    const matches = (bill: unknown): bill is BillingLedgerBill => {
-      if (!bill || typeof bill !== 'object') return false;
-      const id = (bill as BillingLedgerBill).bill_id;
-      return id === baseId || new RegExp(`^${baseId}-r\\d+$`).test(id);
-    };
-    const byId = new Map<string, BillingLedgerBill>();
-    const summaries = attributes.bills;
-    if (Array.isArray(summaries)) {
-      for (const bill of summaries) {
-        if (matches(bill)) byId.set(bill.bill_id, bill);
-      }
-    }
-    // Prefer the full latest_bill record over its compact history entry when
-    // both refer to the displayed period.
-    const latest = attributes.latest_bill;
-    if (matches(latest)) byId.set(latest.bill_id, latest);
-    return [...byId.values()].sort(
-      (a, b) => this._billRevision(baseId, b.bill_id) - this._billRevision(baseId, a.bill_id),
-    )[0];
+    if (!attributes) return [];
+    const isBill = (bill: unknown): bill is BillingLedgerBill =>
+      !!bill && typeof bill === 'object' && typeof (bill as BillingLedgerBill).bill_id === 'string';
+    const rows: BillingLedgerBill[] = Array.isArray(attributes.bills) ? attributes.bills.filter(isBill) : [];
+    const latest = isBill(attributes.latest_bill) ? attributes.latest_bill : undefined;
+    const merged = rows.map((row) => (latest && row.bill_id === latest.bill_id ? { ...row, ...latest } : row));
+    if (latest && !rows.some((row) => row.bill_id === latest.bill_id)) merged.unshift(latest);
+    return merged;
+  }
+
+  /** Highest non-void revision of the ledger bill matching the entered service dates. */
+  private _ledgerBill(): BillingLedgerBill | undefined {
+    const period = this._lastBillPeriod();
+    if (!period) return undefined;
+    return this._ledgerHistory()
+      .filter((bill) => bill.status !== 'void' && this._billRevision(period.billId, bill.bill_id) > 0)
+      .sort(
+        (a, b) => this._billRevision(period.billId, b.bill_id) - this._billRevision(period.billId, a.bill_id),
+      )[0];
   }
 
   private _billRevision(baseId: string, billId: string): number {
@@ -1070,16 +1291,9 @@ export class RvEnergyCard extends LitElement {
   }
 
   private _nextBillRevisionId(baseId: string): string {
-    const entityId = this._config.billing_ledger_entity;
-    const attributes = entityId ? this.hass?.states[entityId]?.attributes : undefined;
-    const bills = Array.isArray(attributes?.bills) ? attributes.bills : [];
-    const latest = attributes?.latest_bill;
-    const ids = [
-      ...bills.map((bill) => (bill && typeof bill === 'object' ? (bill as BillingLedgerBill).bill_id : '')),
-      latest && typeof latest === 'object' ? (latest as BillingLedgerBill).bill_id : '',
-    ];
-    const maxRevision = ids.reduce(
-      (max, id) => Math.max(max, this._billRevision(baseId, id)),
+    // Voided ids count too: the ledger never reuses an id.
+    const maxRevision = this._ledgerHistory().reduce(
+      (max, bill) => Math.max(max, this._billRevision(baseId, bill.bill_id)),
       1,
     );
     return `${baseId}-r${maxRevision + 1}`;
@@ -1097,33 +1311,37 @@ export class RvEnergyCard extends LitElement {
 
   private _saveAndReconcileBill = async () => {
     if (!this.hass || this._ledgerBusy) return;
-    const north = this._lastPeriodStats.north;
-    const south = this._lastPeriodStats.south;
-    const shed = this._lastPeriodStats.shed;
+    const period = this._lastBillPeriod();
+    const { north, south, shed } = this._lastPeriodStats;
     const billedKwh = this._num(this._config.last_bill_kwh_entity);
-    if (north == null || south == null || shed == null || billedKwh <= 0) {
-      this._invoiceStatus = 'Cannot reconcile: complete statistics and billed kWh are required.';
+    if (
+      !period ||
+      this._lastPeriodKey !== period.billId ||
+      !this._lastPeriodComplete ||
+      north == null ||
+      south == null ||
+      shed == null ||
+      billedKwh <= 0
+    ) {
+      this._invoiceStatus =
+        'Cannot reconcile: enter the service dates and kWh, and wait for complete statistics.';
       return;
     }
-    const period = this._previousPeriod();
     const existing = this._ledgerBill();
+    const idTaken = this._ledgerHistory().some((bill) => this._billRevision(period.billId, bill.bill_id) > 0);
     const billId =
-      existing && ['approved', 'invoice_requested', 'issued'].includes(existing.status)
-        ? this._nextBillRevisionId(period.billId)
-        : existing?.bill_id ?? period.billId;
-    const date = (value: Date) => {
-      const y = value.getFullYear();
-      const m = String(value.getMonth() + 1).padStart(2, '0');
-      const d = String(value.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
-    };
+      existing && ['draft', 'reconciled'].includes(existing.status)
+        ? existing.bill_id
+        : idTaken
+          ? this._nextBillRevisionId(period.billId)
+          : period.billId;
     this._ledgerBusy = true;
     this._invoiceStatus = 'Saving utility bill and reconciliation snapshot…';
     try {
       await this._callLedger('upsert_bill', {
         bill_id: billId,
-        period_start: date(period.start),
-        period_end: date(period.end),
+        period_start: this._isoDate(period.start),
+        period_end: this._isoDate(period.end),
         billed_kwh: billedKwh,
         energy_charge: this._num(this._config.last_bill_energy_entity),
         local_tax: this._num(this._config.last_bill_local_tax_entity),
@@ -1159,77 +1377,121 @@ export class RvEnergyCard extends LitElement {
     }
   };
 
-  private _invoiceUsage(): { north: number; shed: number; total: number } | undefined {
-    const north = this._lastPeriodStats.north;
-    const south = this._lastPeriodStats.south;
-    const shed = this._lastPeriodStats.shed;
-    const billedKwh = this._num(this._config.last_bill_kwh_entity);
-    if (north == null || south == null || shed == null || billedKwh <= 0) return undefined;
-    const total = north + shed;
-    return total > 0 ? { north, shed, total } : undefined;
+  /**
+   * What the invoice bills, from the frozen snapshot: each in-laws site's
+   * monitored kWh scaled to the bill's kWh (proportional_bill_v1), so the PDF
+   * total equals the ledger's allocated share of the bill.
+   */
+  private _invoicePlan():
+    | { bill: BillingLedgerBill; north: number; shed: number; amount: number }
+    | undefined {
+    const bill = this._ledgerBill();
+    const snapshot = bill?.reconciliation;
+    if (!bill || !snapshot || !(snapshot.monitored_kwh > 0) || !(bill.billed_kwh > 0)) return undefined;
+    const scale = bill.billed_kwh / snapshot.monitored_kwh;
+    return {
+      bill,
+      north: snapshot.north_kwh * scale,
+      shed: snapshot.shed_kwh * scale,
+      amount: bill.bill_total * ((snapshot.north_kwh + snapshot.shed_kwh) / snapshot.monitored_kwh),
+    };
   }
 
   private _generateInvoice = async () => {
     const script = this._config.invoice_script;
-    if (!this.hass || !script) return;
-    const usage = this._invoiceUsage();
-    if (!usage) {
-      this._invoiceStatus = 'Invoice not generated: last-period statistics or billed kWh are unavailable.';
+    if (!this.hass || !script || this._ledgerBusy) return;
+    const plan = this._invoicePlan();
+    if (plan?.bill.status !== 'approved') {
+      this._invoiceStatus = 'Invoice not generated: save, reconcile, and approve the bill snapshot first.';
       return;
     }
-    const ledgerBill = this._ledgerBill();
-    if (ledgerBill?.status !== 'approved') {
-      this._invoiceStatus = 'Invoice not generated: approve the reconciliation snapshot first.';
-      return;
-    }
+    const { bill } = plan;
     const [domain, service] = script.split('.');
-    const { start } = this._billingWindow();
-    const periodStart = new Date(start.getFullYear(), start.getMonth() - 1, start.getDate());
-    const date = (value: Date) => value.toISOString().slice(0, 10);
     const roundKwh = (value: number) => Math.round(value * 1000) / 1000;
-    this._invoiceStatus = `Generating invoice for ${usage.total.toFixed(1)} kWh…`;
+    const serviceData: Record<string, unknown> = {
+      period_start: bill.period_start,
+      period_end: bill.period_end,
+      north_kwh_override: roundKwh(plan.north),
+      shed_kwh_override: roundKwh(plan.shed),
+      snapshot_kwh: bill.billed_kwh,
+    };
+    // Rates derive from the frozen bill amounts, not helpers edited since approval.
+    if (bill.energy_charge != null) serviceData.snapshot_energy = bill.energy_charge;
+    if (bill.local_tax != null) serviceData.snapshot_local_tax = bill.local_tax;
+    if (bill.state_tax != null) serviceData.snapshot_sc_tax = bill.state_tax;
+    const billedKwh = (plan.north + plan.shed).toFixed(1);
+    this._ledgerBusy = true;
+    this._invoiceStatus = `Generating invoice for ${billedKwh} billed kWh…`;
     try {
-      await this.hass.callWS({
-        type: 'call_service',
-        domain,
-        service,
-        service_data: {
-          period_start: date(periodStart),
-          period_end: date(start),
-          north_kwh_override: roundKwh(usage.north),
-          shed_kwh_override: roundKwh(usage.shed),
-        },
-      });
-      await this._callLedger('mark_invoice_requested', { bill_id: ledgerBill.bill_id });
+      await this.hass.callWS({ type: 'call_service', domain, service, service_data: serviceData });
+      await this._callLedger('mark_invoice_requested', { bill_id: bill.bill_id });
       const base = this._config.invoice_url_base;
       if (base) {
-        const ym = `${periodStart.getFullYear()}-${String(periodStart.getMonth() + 1).padStart(2, '0')}`;
         await this._callLedger('record_invoice', {
-          bill_id: ledgerBill.bill_id,
-          invoice_url: `${base}${ym}.pdf`,
+          bill_id: bill.bill_id,
+          invoice_url: `${base}${bill.period_start.slice(0, 7)}.pdf`,
           revision: 1,
         });
-        this._invoiceStatus = `Invoice issued with ${usage.total.toFixed(1)} kWh of monitored usage.`;
+        this._invoiceStatus = `Invoice issued: $${plan.amount.toFixed(2)} for ${billedKwh} billed kWh.`;
       } else {
-        this._invoiceStatus = `Invoice requested with ${usage.total.toFixed(1)} kWh of monitored usage.`;
+        this._invoiceStatus = `Invoice requested: $${plan.amount.toFixed(2)} for ${billedKwh} billed kWh.`;
       }
     } catch {
       this._invoiceStatus = 'Invoice request failed. Check the Home Assistant script trace.';
+    } finally {
+      this._ledgerBusy = false;
     }
   };
 
-  private _updateBilledKwh = (e: Event) => {
+  private async _voidBill(billId: string) {
+    if (!this.hass || this._ledgerBusy) return;
+    if (this._confirmVoid !== billId) {
+      this._confirmVoid = billId;
+      return;
+    }
+    this._confirmVoid = undefined;
+    this._ledgerBusy = true;
+    try {
+      await this._callLedger('void_bill', { bill_id: billId, reason: 'Voided from the RV Energy card' });
+      this._invoiceStatus = `Voided ${billId}.`;
+    } catch (error) {
+      this._invoiceStatus = `Void failed: ${error instanceof Error ? error.message : 'check Home Assistant logs'}`;
+    } finally {
+      this._ledgerBusy = false;
+    }
+  }
+
+  private _setBillNumber = (e: Event) => {
     const input = e.target as HTMLInputElement;
+    const entity = input.dataset.entity;
     const value = parseFloat(input.value);
-    if (!this.hass || isNaN(value) || value < 0) return;
-    const entity = this._config.last_bill_kwh_entity;
-    if (!entity) return;
-    this.hass.callWS({
-      type: 'call_service',
-      domain: 'input_number',
-      service: 'set_value',
-      service_data: { entity_id: entity, value },
-    });
+    if (!this.hass || !entity || !Number.isFinite(value) || value < 0) return;
+    this.hass
+      .callWS({
+        type: 'call_service',
+        domain: 'input_number',
+        service: 'set_value',
+        service_data: { entity_id: entity, value },
+      })
+      .catch(() => {
+        this._invoiceStatus = `Could not save ${entity}; check its min/max.`;
+      });
+  };
+
+  private _setBillDate = (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const entity = input.dataset.entity;
+    if (!this.hass || !entity || !this._localDate(input.value)) return;
+    this.hass
+      .callWS({
+        type: 'call_service',
+        domain: 'input_datetime',
+        service: 'set_datetime',
+        service_data: { entity_id: entity, date: input.value },
+      })
+      .catch(() => {
+        this._invoiceStatus = `Could not save ${entity}.`;
+      });
   };
 
   /**
@@ -1530,6 +1792,10 @@ export class RvEnergyCard extends LitElement {
         letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink); margin: 0;
       }
       .sec-head .rule { flex: 1; height: 1px; background: var(--hairline); }
+      .sec-head .meta {
+        font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--ink-dim); text-align: right;
+      }
       .prov {
         font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
         padding: 3px 8px; border-radius: 4px;
@@ -1563,16 +1829,25 @@ export class RvEnergyCard extends LitElement {
       .recon-v.ledger { color: var(--ledger); }
       .recon-v.alert { color: var(--needle); }
       .recon-k2 { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); margin-top: 4px; }
-      .recon-edit { margin-top: 8px; }
+      .bill-entry {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px;
+        margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--hairline);
+      }
+      .bill-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+      .bill-field span {
+        font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.12em;
+        text-transform: uppercase; color: var(--ink-faint);
+      }
       .bill-input {
-        width: 100%; max-width: 120px; padding: 6px 8px; font-family: var(--font-mono);
+        width: 100%; box-sizing: border-box; padding: 6px 8px; font-family: var(--font-mono);
         font-size: 12px; color: var(--ink); background: var(--well); border: 1px solid var(--hairline);
-        border-radius: 4px;
+        border-radius: 4px; color-scheme: dark;
       }
       .bill-input:focus { outline: none; border-color: var(--brass-dim); }
-      .edit-hint { font-family: var(--font-mono); font-size: 9px; color: var(--ink-faint); margin-left: 6px; }
+      .bill-input:disabled { opacity: .5; }
       .var-note { font-family: var(--font-mono); font-size: 11px; color: var(--ink-dim); margin-top: 16px; line-height: 1.6; }
       .var-note b { color: var(--ledger); font-weight: 700; }
+      .var-note b.warn { color: var(--needle); }
       .var-note code { color: var(--brass); font-size: 11px; }
 
       /* Invoice actions + list */
@@ -1610,7 +1885,17 @@ export class RvEnergyCard extends LitElement {
       }
       .invoice-row:last-child { border-bottom: none; }
       .invoice-row .p { color: var(--ink); }
+      .invoice-row .p small { color: var(--brass); font-size: 10px; margin-left: 6px; }
+      .invoice-row .m { color: var(--ink-dim); margin-left: auto; padding: 0 14px; text-align: right; }
+      .invoice-row .s { display: inline-flex; align-items: center; gap: 12px; }
+      .invoice-row .s .ledger-state { margin-right: 0; }
       .invoice-row a { color: var(--brass); text-decoration: none; font-weight: 700; }
+      .link-btn {
+        background: none; border: none; padding: 0; cursor: pointer; color: var(--ink-faint);
+        font: 700 11px var(--font-mono); text-decoration: underline dotted;
+      }
+      .link-btn.confirm { color: var(--needle); }
+      .link-btn:disabled { opacity: .48; cursor: default; }
       .allocation { margin-top: 12px; border-top: 1px solid var(--hairline); font-family: var(--font-mono); }
       .allocation-head { padding: 10px 0 7px; color: var(--ink-faint); font-size: 9px; letter-spacing: .12em; text-transform: uppercase; }
       .allocation-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid color-mix(in srgb, var(--hairline) 65%, transparent); color: var(--ink-dim); font-size: 11px; }
@@ -1630,6 +1915,8 @@ export class RvEnergyCard extends LitElement {
         .map-aside { border-left: 0; border-top: 1px solid var(--hairline); }
       }
       @media (max-width: 480px) {
+        .invoice-row { flex-wrap: wrap; gap: 4px; }
+        .invoice-row .m { margin-left: 0; padding: 0; text-align: left; flex-basis: 100%; }
         .register-sub { font-size: 11px; word-wrap: break-word; overflow-wrap: break-word; }
         .flow-well { padding: 12px; min-width: 0; }
         svg.flow-h { display: none; }

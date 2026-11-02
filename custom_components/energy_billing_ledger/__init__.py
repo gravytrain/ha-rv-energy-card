@@ -24,6 +24,7 @@ from .const import (
     STATUS_INVOICE_REQUESTED,
     STATUS_ISSUED,
     STATUS_RECONCILED,
+    STATUS_VOID,
     STORAGE_KEY,
     STORAGE_VERSION,
 )
@@ -73,6 +74,16 @@ RECORD_SCHEMA = vol.Schema(
         vol.Optional("revision", default=1): vol.All(vol.Coerce(int), vol.Range(min=1)),
     }
 )
+VOID_SCHEMA = vol.Schema(
+    {
+        vol.Required("bill_id"): cv.string,
+        vol.Required("reason"): vol.All(cv.string, vol.Length(min=1, max=2048)),
+    }
+)
+# Voiding keeps the record for audit; anything already sent to the invoice
+# generator has an artifact and must be corrected with a revision instead.
+VOIDABLE_STATUSES = {STATUS_DRAFT, STATUS_RECONCILED, STATUS_APPROVED}
+IMMUTABLE_STATUSES = {STATUS_APPROVED, STATUS_INVOICE_REQUESTED, STATUS_ISSUED, STATUS_VOID}
 
 
 def _now() -> str:
@@ -116,8 +127,8 @@ class BillingLedger:
             raise vol.Invalid("period_start must be before period_end")
 
         old = self.data["bills"].get(bill_id)
-        if old and old.get("status") in {STATUS_APPROVED, STATUS_INVOICE_REQUESTED, STATUS_ISSUED}:
-            raise vol.Invalid("Approved or issued bills are immutable; create a new bill revision")
+        if old and old.get("status") in IMMUTABLE_STATUSES:
+            raise vol.Invalid("Approved, issued, or void bills are immutable; create a new bill revision")
 
         timestamp = _now()
         bill = {
@@ -203,6 +214,20 @@ class BillingLedger:
         bill["updated_at"] = _now()
         await self.save()
 
+    async def void(self, call: ServiceCall) -> None:
+        bill = self.require(call.data["bill_id"])
+        if bill["status"] not in VOIDABLE_STATUSES:
+            raise vol.Invalid("Only draft, reconciled, or approved bills without an invoice can be voided")
+        bill["void"] = {
+            "voided_at": _now(),
+            "voided_by": call.context.user_id,
+            "reason": call.data["reason"],
+            "previous_status": bill["status"],
+        }
+        bill["status"] = STATUS_VOID
+        bill["updated_at"] = _now()
+        await self.save()
+
 
 class BillingLedgerSensor(SensorEntity):
     """Expose the latest bill plus a compact history to the dashboard."""
@@ -246,16 +271,21 @@ class BillingLedgerSensor(SensorEntity):
             }
             for bill in bills[:24]
         ]
+        latest = self._latest()
         return {
-            "latest_bill": deepcopy(bills[0]) if bills else None,
+            "latest_bill": deepcopy(latest) if latest else None,
             "bills": history,
             "bill_count": len(bills),
             "schema_version": self.ledger.data["schema_version"],
         }
 
     def _latest(self) -> dict[str, Any] | None:
-        bills = self.ledger.data["bills"].values()
-        return max(bills, key=lambda item: item.get("period_start", ""), default=None)
+        bills = [bill for bill in self.ledger.data["bills"].values() if bill.get("status") != STATUS_VOID]
+        return max(
+            bills,
+            key=lambda item: (item.get("period_start", ""), item.get("updated_at", "")),
+            default=None,
+        )
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
@@ -278,4 +308,5 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     hass.services.async_register(
         DOMAIN, "record_invoice", ledger.record_invoice, schema=RECORD_SCHEMA
     )
+    hass.services.async_register(DOMAIN, "void_bill", ledger.void, schema=VOID_SCHEMA)
     return True

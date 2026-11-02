@@ -101,6 +101,10 @@ export interface RvEnergyCardConfig {
   // billing reconciliation + invoices
   show_last_period?: boolean;
   show_invoices?: boolean;
+  last_bill_start_entity?: string; // input_datetime: bill's SERVICE FROM (meter-read) date
+  last_bill_end_entity?: string; // input_datetime: bill's SERVICE TO (meter-read) date
+  /** Meter MULTI from the bill; whole-number register reads make billed kWh accurate to ± this. */
+  meter_multiplier?: number;
   last_bill_kwh_entity?: string; // co-op billed kWh for the previous period
   last_bill_energy_entity?: string; // co-op energy charge $ for the previous period
   last_bill_local_tax_entity?: string; // co-op local option tax $
@@ -118,7 +122,8 @@ export type BillingLedgerStatus =
   | 'reconciled'
   | 'approved'
   | 'invoice_requested'
-  | 'issued';
+  | 'issued'
+  | 'void';
 
 export interface BillingLedgerBill {
   bill_id: string;
@@ -127,11 +132,23 @@ export interface BillingLedgerBill {
   period_end: string;
   billed_kwh: number;
   bill_total: number;
+  /** Full ledger records (latest_bill) carry the bill's dollar breakdown. */
+  energy_charge?: number;
+  local_tax?: number;
+  state_tax?: number;
   utility_invoice_url?: string;
+  /** Compact history rows carry these instead of the full reconciliation. */
+  variance_pct?: number | null;
+  invoice_url?: string | null;
   reconciliation?: {
+    north_kwh: number;
+    south_kwh: number;
+    shed_kwh: number;
     monitored_kwh: number;
     variance_kwh: number;
     variance_pct?: number;
+    in_laws_share?: number;
+    in_laws_bill_total?: number;
   };
   invoice_revisions?: Array<{ revision: number; url: string; sha256?: string }>;
 }

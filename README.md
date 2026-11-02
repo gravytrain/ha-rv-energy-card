@@ -41,9 +41,12 @@ Refoss backfill job is installed, the card gracefully falls back to the live
 
 ```yaml
 type: custom:rv-energy-card
-billing_start_day: 11
 use_statistics: true
 ```
+
+Create two date-only `input_datetime` helpers, `input_datetime.last_coop_bill_start`
+and `input_datetime.last_coop_bill_end`. The card reconciles each bill on its own
+service dates; without them it falls back to a fixed `billing_start_day`.
 
 ### Bill ledger
 
@@ -55,11 +58,32 @@ Copy `custom_components/energy_billing_ledger` into Home Assistant's
 energy_billing_ledger:
 ```
 
-After restarting Home Assistant, the card's last-period section guides a bill
-through **Save & reconcile → Approve snapshot → Generate invoice**. The ledger is
-stored in Home Assistant's `.storage` directory; approved records are immutable,
-so corrections use a new bill revision. The NAS artifact/API contract is in
+After restarting Home Assistant, the card's **Bill Reconciliation** section guides
+a bill through **Save & reconcile → Approve snapshot → Generate invoice**. The
+ledger is stored in Home Assistant's `.storage` directory; approved records are
+immutable, so corrections use a new bill revision. A mistaken draft or an
+approved-but-uninvoiced record can be voided from the invoice history (it stays
+in the ledger for audit). The NAS artifact/API contract is in
 [`docs/billing-contract.md`](docs/billing-contract.md).
+
+### Monthly bill reconciliation
+
+1. When the co-op bill arrives, open the **Bill Reconciliation** section.
+2. Copy six values from the bill: **Service from** and **Service to** (the two
+   dates under SERVICE — meter-read dates, so each bill's TO is the next bill's
+   FROM), **kWh**, the energy **$ AMOUNT**, **Local Option Tax**, and
+   **S.C. Sales Tax**.
+3. The card queries the device statistics for exactly `[from, to)` and shows the
+   variance. Register reads are whole numbers × the bill's MULTI (40), so a
+   variance under ±40 kWh is the bill's own rounding, not a tracking error.
+4. **Save & reconcile → Approve snapshot → Generate invoice.** The invoice bills
+   North + She-Shed their measured share of the bill (`proportional_bill_v1`):
+   each site's monitored kWh is scaled to the billed kWh, so the PDF total equals
+   the allocation shown on the card.
+
+The in-progress period on the meter register starts at the last bill's TO date
+and estimates the next read one cycle later, so it follows the co-op's drifting
+read day without configuration.
 
 ## Features
 
@@ -80,7 +104,14 @@ so corrections use a new bill revision. The NAS artifact/API contract is in
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `billing_start_day` | `11` | First inclusive day of the billing period |
+| `last_bill_start_entity` | `input_datetime.last_coop_bill_start` | Bill SERVICE FROM date |
+| `last_bill_end_entity` | `input_datetime.last_coop_bill_end` | Bill SERVICE TO date (exclusive end) |
+| `meter_multiplier` | `40` | Bill MULTI; variance below ± this many kWh counts as a match |
+| `last_bill_kwh_entity` | `input_number.last_coop_bill_kwh` | Billed kWh |
+| `last_bill_energy_entity` | `input_number.last_coop_bill_energy_charge` | Energy charge $ |
+| `last_bill_local_tax_entity` | `input_number.last_coop_bill_local_tax` | Local Option Tax $ |
+| `last_bill_sc_tax_entity` | `input_number.last_coop_bill_sc_tax` | S.C. Sales Tax $ |
+| `billing_start_day` | `11` | Fallback fixed cycle day, used only without the bill-date helpers |
 | `use_statistics` | `true` | Pull period kWh from long-term statistics (gap-proof). Set `false` to force live sensors |
 | `show_flow` | `true` | Show the live power gauges section |
 | `show_billing` | `true` | Show the billing period section |
