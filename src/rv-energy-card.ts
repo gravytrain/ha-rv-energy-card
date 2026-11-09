@@ -16,7 +16,7 @@ import type {
   BillingLedgerBill,
 } from './types.js';
 
-const CARD_VERSION = '0.15.0';
+const CARD_VERSION = '0.15.1';
 const DAY_MS = 86400000;
 const HOUR_MS = 3600000;
 
@@ -116,7 +116,16 @@ export class RvEnergyCard extends LitElement {
   @state() private _lastPeriodThrough?: Date;
   /** Ledger bill awaiting a second click to confirm voiding. */
   @state() private _confirmVoid?: string;
+  /** Invoice run started from this card, followed until the ledger shows it issued. */
+  @state() private _invoicePending?: {
+    billId: string;
+    script: string;
+    amount: number;
+    billedKwh: string;
+    sawRunning: boolean;
+  };
 
+  private _invoiceTimer?: number;
   private _statsTimer?: number;
   private _statsLoaded = false;
   private _lastPeriodRequest = 0;
@@ -162,6 +171,10 @@ export class RvEnergyCard extends LitElement {
     };
   }
 
+  protected willUpdate(changed: PropertyValues) {
+    if (changed.has('hass')) this._followInvoiceRun();
+  }
+
   protected updated(changed: PropertyValues) {
     if (!changed.has('hass') || !this.hass || !this._config.use_statistics) return;
     const periodKey = this._lastBillPeriod()?.billId ?? 'none';
@@ -181,6 +194,7 @@ export class RvEnergyCard extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     if (this._statsTimer) clearInterval(this._statsTimer);
+    window.clearTimeout(this._invoiceTimer);
   }
 
   // ---- data helpers -------------------------------------------------------
@@ -1164,7 +1178,9 @@ export class RvEnergyCard extends LitElement {
    */
   private _renderInvoices() {
     const plan = this._invoicePlan();
-    const canGenerate = plan?.bill.status === 'approved';
+    // invoice_requested is left by a run that never confirmed; allow a retry.
+    const canGenerate =
+      !!plan && ['approved', 'invoice_requested'].includes(plan.bill.status) && !this._invoicePending;
     const history = this._ledgerHistory()
       .filter((bill) => bill.status !== 'void')
       .slice(0, 6);
@@ -1399,16 +1415,16 @@ export class RvEnergyCard extends LitElement {
 
   private _generateInvoice = async () => {
     const script = this._config.invoice_script;
-    if (!this.hass || !script || this._ledgerBusy) return;
+    if (!this.hass || !script || this._ledgerBusy || this._invoicePending) return;
     const plan = this._invoicePlan();
-    if (plan?.bill.status !== 'approved') {
+    if (!plan || !['approved', 'invoice_requested'].includes(plan.bill.status)) {
       this._invoiceStatus = 'Invoice not generated: save, reconcile, and approve the bill snapshot first.';
       return;
     }
     const { bill } = plan;
-    const [domain, service] = script.split('.');
     const roundKwh = (value: number) => Math.round(value * 1000) / 1000;
-    const serviceData: Record<string, unknown> = {
+    const variables: Record<string, unknown> = {
+      bill_id: bill.bill_id,
       period_start: bill.period_start,
       period_end: bill.period_end,
       north_kwh_override: roundKwh(plan.north),
@@ -1416,32 +1432,61 @@ export class RvEnergyCard extends LitElement {
       snapshot_kwh: bill.billed_kwh,
     };
     // Rates derive from the frozen bill amounts, not helpers edited since approval.
-    if (bill.energy_charge != null) serviceData.snapshot_energy = bill.energy_charge;
-    if (bill.local_tax != null) serviceData.snapshot_local_tax = bill.local_tax;
-    if (bill.state_tax != null) serviceData.snapshot_sc_tax = bill.state_tax;
+    if (bill.energy_charge != null) variables.snapshot_energy = bill.energy_charge;
+    if (bill.local_tax != null) variables.snapshot_local_tax = bill.local_tax;
+    if (bill.state_tax != null) variables.snapshot_sc_tax = bill.state_tax;
     const billedKwh = (plan.north + plan.shed).toFixed(1);
-    this._ledgerBusy = true;
-    this._invoiceStatus = `Generating invoice for ${billedKwh} billed kWh…`;
+    this._invoicePending = { billId: bill.bill_id, script, amount: plan.amount, billedKwh, sawRunning: false };
+    this._invoiceStatus = `Generating invoice for ${billedKwh} billed kWh — the NAS takes about 20 seconds…`;
     try {
-      await this.hass.callWS({ type: 'call_service', domain, service, service_data: serviceData });
-      await this._callLedger('mark_invoice_requested', { bill_id: bill.bill_id });
-      const base = this._config.invoice_url_base;
-      if (base) {
-        await this._callLedger('record_invoice', {
-          bill_id: bill.bill_id,
-          invoice_url: `${base}${bill.period_start.slice(0, 7)}.pdf`,
-          revision: 1,
-        });
-        this._invoiceStatus = `Invoice issued: $${plan.amount.toFixed(2)} for ${billedKwh} billed kWh.`;
-      } else {
-        this._invoiceStatus = `Invoice requested: $${plan.amount.toFixed(2)} for ${billedKwh} billed kWh.`;
-      }
-    } catch {
-      this._invoiceStatus = 'Invoice request failed. Check the Home Assistant script trace.';
-    } finally {
-      this._ledgerBusy = false;
+      // Start without waiting for the PDF render: the script records the invoice
+      // in the ledger itself, so a dropped browser connection can't lose it.
+      await this.hass.callWS({
+        type: 'call_service',
+        domain: 'script',
+        service: 'turn_on',
+        target: { entity_id: script },
+        service_data: { variables },
+      });
+    } catch (error) {
+      this._invoicePending = undefined;
+      this._invoiceStatus = `Invoice request failed: ${error instanceof Error ? error.message : 'check the Home Assistant script trace'}`;
+      return;
     }
+    window.clearTimeout(this._invoiceTimer);
+    this._invoiceTimer = window.setTimeout(() => {
+      if (!this._invoicePending) return;
+      this._invoicePending = undefined;
+      this._invoiceStatus =
+        'No confirmation from the invoice script after 2 minutes. Check Notifications and the script trace.';
+    }, 120000);
   };
+
+  /** Follows a started invoice run through HA state: ledger issued, or script ended without it. */
+  private _followInvoiceRun() {
+    const pending = this._invoicePending;
+    if (!pending || !this.hass) return;
+    const issued = this._ledgerHistory().some(
+      (bill) => bill.bill_id === pending.billId && bill.status === 'issued',
+    );
+    if (issued) {
+      window.clearTimeout(this._invoiceTimer);
+      this._invoicePending = undefined;
+      this._invoiceStatus = `Invoice issued: $${pending.amount.toFixed(2)} for ${pending.billedKwh} billed kWh.`;
+      return;
+    }
+    // The ledger update lands before the script turns off, so "off" without
+    // "issued" means the NAS call failed (the script posts the error as a notification).
+    const running = this.hass.states[pending.script]?.state === 'on';
+    if (running) {
+      pending.sawRunning = true;
+    } else if (pending.sawRunning) {
+      window.clearTimeout(this._invoiceTimer);
+      this._invoicePending = undefined;
+      this._invoiceStatus =
+        'The invoice script finished without issuing the invoice. Check Notifications for the NAS error.';
+    }
+  }
 
   private async _voidBill(billId: string) {
     if (!this.hass || this._ledgerBusy) return;

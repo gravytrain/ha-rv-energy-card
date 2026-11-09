@@ -79,7 +79,9 @@ in the ledger for audit). The NAS artifact/API contract is in
 4. **Save & reconcile → Approve snapshot → Generate invoice.** The invoice bills
    North + She-Shed their measured share of the bill (`proportional_bill_v1`):
    each site's monitored kWh is scaled to the billed kWh, so the PDF total equals
-   the allocation shown on the card.
+   the allocation shown on the card. The card only starts the invoice script
+   (passing `bill_id`); the script marks the bill issued in the ledger after the
+   NAS returns the PDF, so closing the tab during the ~20 s render loses nothing.
 
 The in-progress period on the meter register starts at the last bill's TO date
 and estimates the next read one cycle later, so it follows the co-op's drifting
